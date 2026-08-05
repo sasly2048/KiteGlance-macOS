@@ -245,6 +245,8 @@ actor KiteService {
             throw KiteError("Invalid response")
         }
 
+        ApiDump.write(data, path: path)
+
         if http.statusCode == 401 || http.statusCode == 403 {
             let payload = try? JSONDecoder().decode(KiteEnvelope.self, from: data)
             if payload?.error_type == "TokenException" {
@@ -298,6 +300,49 @@ actor KiteService {
         SHA256.hash(data: Data(input.utf8))
             .map { String(format: "%02x", $0) }
             .joined()
+    }
+}
+
+// MARK: - Debug dump
+
+/// `KITEGLANCE_DEBUG=1` dumps raw API responses to
+/// `~/Library/Application Support/KiteGlance/api-dump.json`. Field names in
+/// Kite's API have shifted across versions; this exists so the truth can be
+/// read instead of guessed at -- the `fund` vs `fund_name` bug is exactly what
+/// it is for.
+enum ApiDump {
+    static let isEnabled = ProcessInfo.processInfo.environment["KITEGLANCE_DEBUG"] == "1"
+
+    static var url: URL {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let dir = appSupport.appendingPathComponent("KiteGlance", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("api-dump.json")
+    }
+
+    /// The dump contains the user's id, email and full holdings in plaintext.
+    /// It exists only to diagnose API shape, so a non-debug launch deletes any
+    /// leftover from a previous debug session: the sensitive file never
+    /// outlives the debugging it was created for.
+    static func purgeIfDisabled() {
+        guard !isEnabled else { return }
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    static func write(_ data: Data, path: String) {
+        guard isEnabled else { return }
+
+        let body = String(data: data, encoding: .utf8) ?? "<non-utf8>"
+        let entry = "// \(path) @ \(Date())\n\(body)\n\n"
+        guard let encoded = entry.data(using: .utf8) else { return }
+
+        if let handle = try? FileHandle(forWritingTo: url) {
+            defer { try? handle.close() }
+            try? handle.seekToEnd()
+            try? handle.write(contentsOf: encoded)
+        } else {
+            try? encoded.write(to: url, options: .atomic)
+        }
     }
 }
 

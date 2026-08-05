@@ -22,6 +22,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         logger.info("KiteGlance starting")
 
+        // Parity with the Windows single-instance mutex: two widgets would fight
+        // over the same state file and double every API call. NSRunningApplication
+        // is the macOS equivalent -- a second copy defers to the first.
+        if isAlreadyRunning() {
+            logger.info("Another instance is already running; exiting")
+            NSApp.terminate(nil)
+            return
+        }
+
+        // A leftover API dump from a previous debug session must not outlive it.
+        ApiDump.purgeIfDisabled()
+
         setupStatusItem()
         createWidgetWindow()
         widgetController?.showWindow(nil)
@@ -76,6 +88,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func createWidgetWindow() {
         widgetController = WidgetWindowController()
+    }
+
+    private func isAlreadyRunning() -> Bool {
+        guard let bundleID = Bundle.main.bundleIdentifier else { return false }
+        return NSRunningApplication
+            .runningApplications(withBundleIdentifier: bundleID)
+            .contains { $0 != .current }
     }
 
     @objc private func toggleWidget() {

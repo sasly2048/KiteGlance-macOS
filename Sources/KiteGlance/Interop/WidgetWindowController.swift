@@ -3,7 +3,7 @@ import SwiftUI
 import KiteGlanceCore
 import os.log
 
-class WidgetWindowController: NSWindowController {
+class WidgetWindowController: NSWindowController, NSWindowDelegate {
     private let logger = Logger(subsystem: "com.kiteglance", category: "WidgetWindow")
     private var hostingView: NSHostingView<WidgetView>?
     private var viewModel: PortfolioViewModel
@@ -13,6 +13,7 @@ class WidgetWindowController: NSWindowController {
     private var sessionCheckTimer: Timer?
     private var tickerTimer: Timer?
     private var settingsController: SettingsWindowController?
+    private var saveDebounce: Task<Void, Never>?
 
     init() {
         self.viewModel = PortfolioViewModel()
@@ -37,6 +38,7 @@ class WidgetWindowController: NSWindowController {
 
         super.init(window: window)
 
+        window.delegate = self
         setupView()
         restorePosition()
         applyPinMode()
@@ -46,6 +48,9 @@ class WidgetWindowController: NSWindowController {
     var customBackdropPath: String? {
         state.customBackdropPath
     }
+
+    var isExpanded: Bool { viewModel.expanded }
+    var activeTab: String { viewModel.activeTab }
 
     required init?(coder: NSCoder) { fatalError() }
 
@@ -80,6 +85,19 @@ class WidgetWindowController: NSWindowController {
         guard let window else { return }
         state.position = window.frame.origin
         state.save()
+    }
+
+    /// Debounced position save, matching the Windows `Debounce(600ms)`. Dragging
+    /// emits a continuous stream of frame changes; writing the JSON on each one
+    /// would hammer the disk. Without this the position was only persisted at
+    /// shutdown, so a crash or force-quit lost it entirely.
+    func queueSavePosition() {
+        saveDebounce?.cancel()
+        saveDebounce = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(600))
+            guard !Task.isCancelled else { return }
+            self?.savePosition()
+        }
     }
 
     func applyPinMode() {
@@ -156,7 +174,15 @@ class WidgetWindowController: NSWindowController {
         tickerTimer?.invalidate()
         sessionCheckTimer?.invalidate()
         autoRefreshTimer?.invalidate()
+        // Cancel the pending debounce first: it would otherwise fire after this
+        // final write and race it.
+        saveDebounce?.cancel()
+        saveDebounce = nil
         savePosition()
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        queueSavePosition()
     }
 
     func toggleVisibility() {
@@ -308,6 +334,31 @@ class WidgetWindowController: NSWindowController {
 
 class WidgetWindow: NSWindow {
     weak var controller: WidgetWindowController?
+
+    /// Parity with the Windows `OnKey` handler: Esc collapses, Space/Enter
+    /// toggles, R refreshes, Tab switches between stocks and funds.
+    override func keyDown(with event: NSEvent) {
+        guard let controller else {
+            super.keyDown(with: event)
+            return
+        }
+
+        // 53 = Escape, 49 = Space, 36 = Return, 48 = Tab.
+        switch event.keyCode {
+        case 53:
+            if controller.isExpanded { controller.toggleExpanded() } else { super.keyDown(with: event) }
+        case 49, 36:
+            controller.toggleExpanded()
+        case 48:
+            controller.switchTab(controller.activeTab == "stocks" ? "funds" : "stocks")
+        default:
+            if event.charactersIgnoringModifiers?.lowercased() == "r" {
+                Task { await controller.refreshNow() }
+            } else {
+                super.keyDown(with: event)
+            }
+        }
+    }
 
     /// The drag strip along the top of the widget, in points. Everything below
     /// it belongs to SwiftUI.
