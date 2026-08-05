@@ -16,6 +16,9 @@ struct WidgetView: View {
     @State private var toastMessage: String?
     @State private var toastOffset: CGFloat = 8
     @State private var toastOpacity: Double = 0
+    /// Drives the holdings-row stagger. Flipped true once the pane is open so
+    /// the rows animate in rather than appearing all at once.
+    @State private var rowsVisible = false
 
     private let compactHeight: CGFloat = 256
     private let rowHeight: CGFloat = 58
@@ -79,6 +82,17 @@ struct WidgetView: View {
         .onChange(of: viewModel.clockTick) { _, _ in
             refreshBackdrop()
         }
+        // Rows stage in after the pane opens and clear instantly when it closes,
+        // so a reopen replays the stagger from the start.
+        .onChange(of: viewModel.expanded) { _, isExpanded in
+            if isExpanded {
+                rowsVisible = true
+            } else {
+                var instant = Transaction()
+                instant.disablesAnimations = true
+                withTransaction(instant) { rowsVisible = false }
+            }
+        }
     }
 
     private var paneHeight: CGFloat {
@@ -96,6 +110,12 @@ struct WidgetView: View {
         }
         backdropImage(currentBackdrop)
             .opacity(nextBackdrop == nil ? 1 : 1 - backdropOpacity)
+
+        // Darkening scrim, applied only over user-supplied images. `scrimOpacity`
+        // was previously declared and never rendered.
+        Color.black
+            .opacity(scrimOpacity * 0.35)
+            .allowsHitTesting(false)
     }
 
     /// `.custom` is a `BackdropMode`, not a `BackdropImage` -- the old
@@ -202,8 +222,10 @@ struct WidgetView: View {
             }
         }
         .frame(height: 28)
-        .contentShape(Rectangle())
-        .gesture(DragGesture().onChanged { _ in controller.handleDrag(NSEvent.mouseEvent(with: .leftMouseDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!) })
+        // No drag gesture here: `WidgetWindow.mouseDown` already drags the header
+        // strip using the real event. The gesture this replaced synthesised an
+        // NSEvent at `location: .zero`, which teleported the window to the corner
+        // of the screen instead of moving it with the cursor.
     }
 
     // MARK: - Hero Section
@@ -215,11 +237,14 @@ struct WidgetView: View {
                     .font(.system(size: 11.5, weight: .medium))
                     .foregroundStyle(Color(white: 1, opacity: 0.3))
 
+                // 720ms on the hero, 640ms elsewhere, matching the Windows
+                // Numeral tween durations.
                 Text(Money.rupees(viewModel.heroValue))
                     .font(.system(size: 40, weight: .semibold, design: .rounded))
                     .foregroundStyle(viewModel.heroColor)
                     .contentTransition(.numericText())
                     .monospacedDigit()
+                    .animation(.easeOut(duration: 0.72), value: viewModel.heroValue)
             }
 
             Spacer()
@@ -234,6 +259,8 @@ struct WidgetView: View {
                 Text("\(abs(viewModel.heroPct).formatted(.number.precision(.fractionLength(2))))%")
                     .font(.system(size: 11.5, weight: .semibold))
                     .monospacedDigit()
+                    .contentTransition(.numericText())
+                    .animation(.easeOut(duration: 0.72), value: viewModel.heroPct)
             }
             .foregroundStyle(Color(white: 1, opacity: 0.3))
             .padding(.horizontal, 8)
@@ -252,6 +279,9 @@ struct WidgetView: View {
                 Text(Money.rupees(viewModel.invested))
                     .font(.system(size: 12))
                     .foregroundStyle(Color(white: 1, opacity: 0.3))
+                    .monospacedDigit()
+                    .contentTransition(.numericText())
+                    .animation(.easeOut(duration: 0.64), value: viewModel.invested)
 
                 Image(systemName: "arrow.right")
                     .font(.system(size: 9, weight: .medium))
@@ -260,6 +290,9 @@ struct WidgetView: View {
                 Text(Money.rupees(viewModel.currentValue))
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Color.white)
+                    .monospacedDigit()
+                    .contentTransition(.numericText())
+                    .animation(.easeOut(duration: 0.64), value: viewModel.currentValue)
 
                 Spacer()
 
@@ -269,6 +302,13 @@ struct WidgetView: View {
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(viewModel.activeTab == "funds" ? Color(white: 1, opacity: 0.3) : (viewModel.overallPnl >= 0 ? Color.green : Color.red))
                     .monospacedDigit()
+                    .contentTransition(.numericText())
+                    // Keyed on the tab too, so switching tabs cuts rather than
+                    // counting from a rupee total to a fund count -- two
+                    // unrelated facts. Windows calls Numeral.Reset here for the
+                    // same reason.
+                    .animation(.easeOut(duration: 0.64), value: viewModel.overallPnl)
+                    .animation(nil, value: viewModel.activeTab)
             }
 
             // Track bar
@@ -351,8 +391,19 @@ struct WidgetView: View {
                     if viewModel.holdingsViewModels.isEmpty {
                         emptyState
                     } else {
-                        ForEach(viewModel.holdingsViewModels) { holding in
+                        // Rows arrive top-down, 26ms apart, floating up 10pt and
+                        // settling -- the Windows StaggerIn timing. SwiftUI does
+                        // this with a per-row animation delay; no walking of item
+                        // containers needed.
+                        ForEach(Array(viewModel.holdingsViewModels.enumerated()), id: \.element.id) { index, holding in
                             HoldingRow(viewModel: holding)
+                                .opacity(rowsVisible ? 1 : 0)
+                                .offset(y: rowsVisible ? 0 : 10)
+                                .animation(
+                                    .spring(response: 0.52, dampingFraction: 0.95)
+                                        .delay(rowsVisible ? Double(index) * 0.026 : 0),
+                                    value: rowsVisible
+                                )
                                 .onTapGesture {
                                     copyToPasteboard(holding.rawSymbol)
                                     showToast("Copied \(holding.symbol)")
@@ -455,8 +506,10 @@ struct WidgetView: View {
                             LinearGradient(colors: [Color(red: 0x33/255, green: 0x95/255, blue: 1), Color.blue], startPoint: .top, endPoint: .bottom)
                         )
                         .clipShape(RoundedRectangle(cornerRadius: 9))
+                        .opacity(viewModel.isSigningIn ? 0.5 : 1)
                 }
                 .buttonStyle(.plain)
+                .disabled(viewModel.isSigningIn)
             }
             .padding(30)
         }
@@ -503,8 +556,10 @@ struct WidgetView: View {
 
     // MARK: - Actions
 
+    /// Presents the same menu as the status-bar item. Was previously an empty
+    /// stub, so the `⋯` button did nothing.
     private func showMenu() {
-        // Menu is handled by status item
+        controller.showContextMenu()
     }
 
     private func copyToPasteboard(_ string: String) {
@@ -519,7 +574,10 @@ struct WidgetView: View {
     }
 
     private func initialize() async {
-        refreshBackdrop()
+        // First paint lands instantly -- a 1.2s dissolve from nothing on launch
+        // would read as a glitch. Windows passes `instant: true` here too.
+        currentBackdrop = BackdropService.pick(mode: controller.state.backdropMode)
+        scrimOpacity = controller.state.backdropMode == .custom ? 1 : 0
 
         // Start breathing animation if market open
         if viewModel.isMarketOpen {
@@ -541,10 +599,17 @@ struct WidgetView: View {
     /// keeping whatever image it launched with.
     func refreshBackdrop() {
         let picked = BackdropService.pick(mode: controller.state.backdropMode)
-        guard picked != currentBackdrop else { return }
+        // A user-supplied photo gets a darkening scrim so text contrast holds;
+        // the built-in gradients are already tuned dark and get none. Same rule
+        // as the Windows ApplyBackdrop.
+        let wantsScrim: Double = controller.state.backdropMode == .custom ? 1 : 0
 
-        withAnimation(.easeInOut(duration: 0.9)) {
+        guard picked != currentBackdrop || wantsScrim != scrimOpacity else { return }
+
+        // 1200ms ease-in-out: dusk should arrive as a dissolve, not a cut.
+        withAnimation(.easeInOut(duration: 1.2)) {
             currentBackdrop = picked
+            scrimOpacity = wantsScrim
         }
     }
 

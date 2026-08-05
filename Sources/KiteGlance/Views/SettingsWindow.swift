@@ -138,7 +138,9 @@ struct SettingsWindow: View {
             .padding(.bottom, 22)
         }
         .frame(width: 400, height: 342)
-        .background(Color(white: 0.07, opacity: 0.95))
+        // Partially transparent so the NSVisualEffectView behind it reads
+        // through. An opaque fill here would defeat the blur entirely.
+        .background(Color(white: 0.07, opacity: 0.72))
         .task {
             if let creds = await CredentialVault().load() {
                 apiKey = creds.apiKey
@@ -206,9 +208,22 @@ final class SettingsWindowController: NSWindowController {
             onSave: onSave,
             onClose: { [weak window] in window?.close() }
         )
+        // The macOS equivalent of the Windows build's acrylic Settings window
+        // (WindowMaterial.Apply(acrylic: true)). NSVisualEffectView samples what
+        // is behind the window; the ~90 lines of DWM attribute calls that
+        // Windows needs have no counterpart here.
+        let effect = NSVisualEffectView()
+        effect.material = .hudWindow
+        effect.blendingMode = .behindWindow
+        effect.state = .active
+        effect.frame = window.contentView?.bounds ?? .zero
+        effect.autoresizingMask = [.width, .height]
+
         let hostingView = NSHostingView(rootView: view)
-        hostingView.frame = window.contentView?.bounds ?? .zero
+        hostingView.frame = effect.bounds
         hostingView.autoresizingMask = [.width, .height]
-        window.contentView = hostingView
+
+        effect.addSubview(hostingView)
+        window.contentView = effect
     }
 }

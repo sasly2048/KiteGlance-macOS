@@ -120,6 +120,9 @@ class PortfolioViewModel: ObservableObject {
     @Published var overlayTitle = ""
     @Published var overlayBody = ""
     @Published var overlayActionTitle = ""
+    /// True while a login round-trip is in flight, so the overlay button can be
+    /// disabled rather than starting a second login server on the same port.
+    @Published var isSigningIn = false
     /// Bumped by the controller's 20-second timer. `syncLabel` and the backdrop
     /// are computed from the wall clock, so something observable has to change
     /// for SwiftUI to recompute them.
@@ -216,17 +219,37 @@ class PortfolioViewModel: ObservableObject {
         return base
     }
 
-    func showConnectOverlay() {
-        overlayTitle = "Connect Kite"
-        overlayBody = "Add your Kite Connect API key and secret to begin."
-        overlayActionTitle = "Set up"
-        showOverlay = true
+    /// The action is required, not optional. `overlayAction` was previously
+    /// declared but never assigned by either of these, so the only button on the
+    /// first-launch screen did nothing and a new user could not set the app up
+    /// at all. The Windows original passes the callback into `ShowOverlay` at
+    /// every call site; making it a required parameter means the compiler
+    /// enforces that.
+    func showConnectOverlay(onAction: @escaping () -> Void) {
+        presentOverlay(
+            title: "Connect Kite",
+            body: "Add your Kite Connect API key and secret to begin.",
+            actionTitle: "Set up",
+            action: onAction
+        )
     }
 
-    func showLoginOverlay(reason: String? = nil) {
-        overlayTitle = "Sign in"
-        overlayBody = reason ?? "Kite sessions reset each morning. Sign in to sync today's portfolio."
-        overlayActionTitle = "Sign in with Kite"
+    func showLoginOverlay(reason: String? = nil, onAction: @escaping () -> Void) {
+        presentOverlay(
+            title: "Sign in",
+            body: reason ?? "Kite sessions reset each morning. Sign in to sync today's portfolio.",
+            actionTitle: "Sign in with Kite",
+            action: onAction
+        )
+    }
+
+    /// Named `presentOverlay`, not `showOverlay`: the latter is already a
+    /// `@Published var` on this type.
+    private func presentOverlay(title: String, body: String, actionTitle: String, action: @escaping () -> Void) {
+        overlayTitle = title
+        overlayBody = body
+        overlayActionTitle = actionTitle
+        overlayAction = action
         showOverlay = true
     }
 

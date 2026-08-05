@@ -100,17 +100,26 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
+    /// The macOS counterpart of DesktopPin.cs. Windows needs ~250 lines for this
+    /// -- rewriting WINDOWPOS in a WndProc hook, or reparenting into Explorer's
+    /// WorkerW -- because there is no window level below the desktop icons.
+    /// AppKit exposes exactly that as a level, so the whole feature is these few
+    /// assignments.
     func applyPinMode() {
         guard let window else { return }
+
+        // Keeps the widget out of the window menu in every mode, matching
+        // WS_EX_TOOLWINDOW on Windows (which also drops it from Alt+Tab).
+        window.isExcludedFromWindowsMenu = true
+        window.ignoresMouseEvents = false
 
         switch state.pinMode {
         case .desktop:
             window.level = .desktop
             window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
-            window.ignoresMouseEvents = false
         case .alwaysOnTop:
             window.level = .floating
-            window.collectionBehavior = [.canJoinAllSpaces, .stationary]
+            window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         case .normal:
             window.level = .normal
             window.collectionBehavior = [.canJoinAllSpaces]
@@ -198,17 +207,32 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
         await fetchPortfolio()
     }
 
+    /// The two overlays and the actions their buttons perform. Both callbacks are
+    /// retained by the view model, which this controller owns, so they capture
+    /// `self` weakly to avoid a reference cycle.
+    private func promptToConnect() {
+        viewModel.showConnectOverlay { [weak self] in
+            self?.showSettings()
+        }
+    }
+
+    private func promptToSignIn(reason: String? = nil) {
+        viewModel.showLoginOverlay(reason: reason) { [weak self] in
+            Task { @MainActor in await self?.signIn() }
+        }
+    }
+
     func bootstrap() async {
         viewModel.activeTab = state.activeTab
 
         // `apiKey` is private to the actor; `hasApiKey()` is the accessor.
         guard await kiteService.hasApiKey() else {
-            viewModel.showConnectOverlay()
+            promptToConnect()
             return
         }
 
         guard await kiteService.isAuthenticated() else {
-            viewModel.showLoginOverlay()
+            promptToSignIn()
             return
         }
 
@@ -237,11 +261,11 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
         } catch let error as KiteError where error.isAuthFailure {
             // Typed, not string-matched: the old `message.contains("expired")`
             // broke the moment Kite reworded its error text.
-            viewModel.showLoginOverlay(reason: "Your session expired for the day. Sign in again.")
+            promptToSignIn(reason: "Your session expired for the day. Sign in again.")
         } catch {
             viewModel.errorMessage = error.localizedDescription
             if viewModel.lastSync == nil {
-                viewModel.showConnectOverlay()
+                promptToConnect()
             }
         }
 
@@ -252,7 +276,7 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
         guard viewModel.isMarketOpen else { return }
 
         if !(await kiteService.isAuthenticated()) {
-            viewModel.showLoginOverlay(reason: "Your session expired. Sign in again.")
+            promptToSignIn(reason: "Your session expired. Sign in again.")
         } else if viewModel.portfolio == nil && !viewModel.showOverlay {
             await fetchPortfolio()
         }
@@ -306,6 +330,14 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func signIn() async {
+        // A second tap while the first login is in flight would try to bind port
+        // 5173 again and fail with "port is busy" -- against ourselves. Windows
+        // disables the button (`OverlayButton.IsEnabled = false`); this is the
+        // same guard.
+        guard !viewModel.isSigningIn else { return }
+        viewModel.isSigningIn = true
+        defer { viewModel.isSigningIn = false }
+
         viewModel.overlayActionTitle = "Waiting for Kite…"
         do {
             let url = await kiteService.loginURL
@@ -321,6 +353,18 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
 
     func handleDrag(_ event: NSEvent) {
         window?.performDrag(with: event)
+    }
+
+    /// Pops the status-bar menu under the widget's `⋯` button. The menu is built
+    /// by the app delegate because every item targets a selector on it.
+    func showContextMenu() {
+        guard let delegate = NSApp.delegate as? AppDelegate,
+              let contentView = window?.contentView else { return }
+
+        let menu = delegate.buildStatusMenu()
+        // Just below the header's trailing edge, where the ⋯ button sits.
+        let origin = NSPoint(x: contentView.bounds.maxX - 28, y: contentView.bounds.maxY - 44)
+        menu.popUp(positioning: nil, at: origin, in: contentView)
     }
 
     /// The view observes `viewModel`, not this controller (an NSWindowController

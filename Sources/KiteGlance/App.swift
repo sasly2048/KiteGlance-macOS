@@ -55,7 +55,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem?.menu = buildStatusMenu()
     }
 
-    private func buildStatusMenu() -> NSMenu {
+    /// Also used by the widget's `⋯` button, so the two menus can never drift
+    /// apart. Every item targets a selector on this object, so the menu has to be
+    /// built here; `target` is set explicitly because a menu shown via `popUp`
+    /// is outside the responder chain that the status item relies on.
+    func buildStatusMenu() -> NSMenu {
         let menu = NSMenu()
 
         menu.addItem(NSMenuItem(title: "Show Widget", action: #selector(toggleWidget), keyEquivalent: ""))
@@ -82,6 +86,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ","))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit KiteGlance", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+
+        // Quit stays untargeted so it walks up to NSApp; everything else points
+        // at this delegate.
+        for item in menu.itemArray + menu.itemArray.compactMap(\.submenu).flatMap(\.itemArray)
+        where item.action != #selector(NSApplication.terminate(_:)) {
+            item.target = self
+        }
 
         return menu
     }
