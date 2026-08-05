@@ -35,7 +35,6 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        window.controller = self
         window.level = .desktopWidget
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         window.isOpaque = false
@@ -49,6 +48,8 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
 
         super.init(window: window)
 
+        // Both assignments pass `self`, so they have to follow super.init.
+        window.controller = self
         window.delegate = self
         setupView()
         restorePosition()
