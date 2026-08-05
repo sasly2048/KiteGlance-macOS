@@ -108,6 +108,7 @@ enum PinMode: String, CaseIterable, Codable {
 enum BackdropMode: String, CaseIterable, Codable {
     case timeOfDay = "Time of Day"
     case rotate = "Rotate"
-    case static = "Graphite (Static)"
+    /// `static` is a Swift keyword, so the case name needs backticks.
+    case `static` = "Graphite (Static)"
     case custom = "Custom"
 }

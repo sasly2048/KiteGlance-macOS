@@ -2,17 +2,25 @@ import SwiftUI
 import AppKit
 
 struct SettingsWindow: View {
-    @ObservedObject var kiteService: KiteService
+    /// `KiteService` is an actor, not an `ObservableObject`, so it cannot be
+    /// observed. This view only ever calls methods on it; it never reads
+    /// published state, so a plain reference is what it actually needs.
+    let kiteService: KiteService
     let onSave: () -> Void
+    /// Injected by the window controller so Save can close the NSWindow.
+    /// `@Environment(\.dismiss)` does nothing inside an NSHostingView that the
+    /// app owns directly -- there is no presentation for SwiftUI to dismiss.
+    let onClose: () -> Void
 
     @State private var apiKey = ""
     @State private var apiSecret = ""
     @State private var errorMessage: String?
-    @Environment(\.dismiss) private var dismiss
+    @State private var isSaving = false
 
-    init(kiteService: KiteService, onSave: @escaping () -> Void) {
+    init(kiteService: KiteService, onSave: @escaping () -> Void, onClose: @escaping () -> Void) {
         self.kiteService = kiteService
         self.onSave = onSave
+        self.onClose = onClose
     }
 
     var body: some View {
@@ -23,7 +31,7 @@ struct SettingsWindow: View {
                     .font(.system(size: 15, weight: .semibold, design: .rounded))
                     .foregroundStyle(Color.white)
                 Spacer()
-                Button(action: { dismiss() }) {
+                Button(action: onClose) {
                     Image(systemName: "xmark")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(Color(white: 1, opacity: 0.3))
@@ -102,7 +110,7 @@ struct SettingsWindow: View {
                 }
 
                 Button(action: save) {
-                    Text("Save")
+                    Text(isSaving ? "Saving…" : "Save")
                         .font(.system(size: 12.5, weight: .semibold))
                         .foregroundStyle(Color.white)
                         .frame(maxWidth: .infinity)
@@ -116,7 +124,9 @@ struct SettingsWindow: View {
                         .clipShape(RoundedRectangle(cornerRadius: 9))
                 }
                 .buttonStyle(.plain)
-                .disabled(apiKey.trimmingCharacters(in: .whitespaces).isEmpty || apiSecret.trimmingCharacters(in: .whitespaces).isEmpty)
+                .disabled(isSaving
+                    || apiKey.trimmingCharacters(in: .whitespaces).isEmpty
+                    || apiSecret.trimmingCharacters(in: .whitespaces).isEmpty)
 
                 Text("Encrypted with macOS Keychain. Stays on this device.")
                     .font(.system(size: 10.5))
@@ -129,12 +139,10 @@ struct SettingsWindow: View {
         }
         .frame(width: 400, height: 342)
         .background(Color(white: 0.07, opacity: 0.95))
-        .onAppear {
-            Task {
-                if let creds = await CredentialVault().load() {
-                    apiKey = creds.apiKey
-                    apiSecret = creds.apiSecret
-                }
+        .task {
+            if let creds = await CredentialVault().load() {
+                apiKey = creds.apiKey
+                apiSecret = creds.apiSecret
             }
         }
     }
@@ -148,24 +156,35 @@ struct SettingsWindow: View {
             return
         }
 
+        isSaving = true
         Task {
+            defer { isSaving = false }
             do {
-                try await CredentialVault().save(Credentials(apiKey: key, apiSecret: secret, accessToken: nil, savedAt: Date()))
+                try await CredentialVault().save(
+                    Credentials(apiKey: key, apiSecret: secret, accessToken: nil, savedAt: Date())
+                )
                 await kiteService.reloadCredentials()
                 onSave()
-                dismiss()
+                onClose()
             } catch {
+                // Surface the Keychain failure. Silently closing would leave the
+                // user believing credentials were stored when they were not.
                 errorMessage = error.localizedDescription
             }
         }
     }
 }
 
-struct SettingsWindowController: NSWindowController {
+/// A class, not a struct: `NSWindowController` is a class, and a struct cannot
+/// inherit from one. The previous declaration could not compile.
+final class SettingsWindowController: NSWindowController {
     convenience init(kiteService: KiteService, onSave: @escaping () -> Void) {
+        // `.titled` with a close button, rather than `.borderless`: a borderless
+        // window cannot become key, so the API key and secret fields would never
+        // receive keyboard focus -- the settings pane would be unusable.
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 400, height: 342),
-            styleMask: [.borderless, .nonactivatingPanel],
+            styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
@@ -173,14 +192,23 @@ struct SettingsWindowController: NSWindowController {
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = true
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.isMovableByWindowBackground = true
+        window.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        window.standardWindowButton(.zoomButton)?.isHidden = true
         window.center()
 
-        let view = SettingsWindow(kiteService: kiteService, onSave: onSave)
+        self.init(window: window)
+
+        let view = SettingsWindow(
+            kiteService: kiteService,
+            onSave: onSave,
+            onClose: { [weak window] in window?.close() }
+        )
         let hostingView = NSHostingView(rootView: view)
         hostingView.frame = window.contentView?.bounds ?? .zero
         hostingView.autoresizingMask = [.width, .height]
         window.contentView = hostingView
-
-        self.init(window: window)
     }
 }

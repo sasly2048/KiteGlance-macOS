@@ -1,5 +1,7 @@
 import Foundation
 import CoreGraphics
+import QuartzCore
+import SwiftUI
 
 // Spring physics for layout animations
 struct Spring {
@@ -29,34 +31,11 @@ struct Spring {
     }
 }
 
-// Spring animation for SwiftUI
-struct SpringAnimation: Animatable, VectorArithmetic {
-    var value: Double
-    let spring: Spring
-    let duration: Double
-    var startTime: Double = 0
-
-    static var zero: SpringAnimation { SpringAnimation(value: 0, spring: .layout, duration: 0.44) }
-
-    var animatableData: Double {
-        get { value }
-        set { value = newValue }
-    }
-
-    static func + (lhs: SpringAnimation, rhs: SpringAnimation) -> SpringAnimation {
-        SpringAnimation(value: lhs.value + rhs.value, spring: lhs.spring, duration: lhs.duration)
-    }
-
-    static func - (lhs: SpringAnimation, rhs: SpringAnimation) -> SpringAnimation {
-        SpringAnimation(value: lhs.value - rhs.value, spring: lhs.spring, duration: lhs.duration)
-    }
-
-    mutating func scale(by rhs: Double) {
-        value *= rhs
-    }
-
-    var magnitudeSquared: Double { value * value }
-}
+// `SpringAnimation` (a VectorArithmetic conformance) was removed: nothing
+// referenced it, and it could not compile -- `VectorArithmetic` requires
+// `AdditiveArithmetic`, whose operators must produce a value from `zero` alone,
+// which its `let spring` / `let duration` stored properties made impossible.
+// SwiftUI's built-in `.spring(response:dampingFraction:)` covers every use here.
 
 // Quartic ease-out for number animations (no overshoot)
 struct QuarticEase {
@@ -88,11 +67,27 @@ class NumeralTween: ObservableObject {
     private var tweens: [ObjectIdentifier: Tween] = [:]
     private var displayLink: CADisplayLink?
 
-    static let shared = NumeralTween()
+    @MainActor static let shared = NumeralTween()
 
-    private init() {
-        displayLink = CADisplayLink(target: self, selector: #selector(tick))
-        displayLink?.add(to: .main, forMode: .common)
+    /// The display link starts on first use rather than in `init`. A
+    /// `@MainActor`-isolated initializer cannot be called from the nonisolated
+    /// context that initializes a `static let`, and a link that ticks with no
+    /// tweens registered just burns a wakeup every frame.
+    private init() {}
+
+    private func startIfNeeded() {
+        guard displayLink == nil else { return }
+        let link = CADisplayLink(target: self, selector: #selector(tick))
+        link.add(to: .main, forMode: .common)
+        displayLink = link
+    }
+
+    /// Stops the link once nothing is animating, so an idle widget does not hold
+    /// the CPU awake at display refresh rate.
+    private func stopIfIdle() {
+        guard tweens.isEmpty, displayLink != nil else { return }
+        displayLink?.invalidate()
+        displayLink = nil
     }
 
     @objc private func tick(_ link: CADisplayLink) {
@@ -120,9 +115,11 @@ class NumeralTween: ObservableObject {
         }
 
         objectWillChange.send()
+        stopIfIdle()
     }
 
     func animate(_ target: AnyObject, from: Decimal, to: Decimal, duration: Double = 0.72, format: @escaping (Decimal) -> String) {
+        startIfNeeded()
         let id = ObjectIdentifier(target)
         if let existing = tweens[id] {
             let current = existing.from + (existing.to - existing.from) * Decimal(QuarticEase.ease(min(existing.elapsed / existing.duration, 1.0)))

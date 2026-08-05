@@ -59,12 +59,27 @@ actor FileLogger {
 
     init(url: URL) { self.url = url }
 
+    /// Appends. `Data.write(options: .withoutOverwriting)` -- what this used to
+    /// do -- *fails* when the file exists, so exactly one line was ever written
+    /// and every later call threw into the empty catch, making rotation below
+    /// unreachable. A file handle seeked to the end is the actual append.
     func write(_ line: String) {
+        guard let data = (line + "\n").data(using: .utf8) else { return }
+
         do {
             try rotateIfNeeded()
-            try (line + "\n").data(using: .utf8)?.write(to: url, options: [.atomic, .withoutOverwriting])
+
+            if !FileManager.default.fileExists(atPath: url.path) {
+                try data.write(to: url, options: .atomic)
+                return
+            }
+
+            let handle = try FileHandle(forWritingTo: url)
+            defer { try? handle.close() }
+            try handle.seekToEnd()
+            try handle.write(contentsOf: data)
         } catch {
-            // Silently ignore logging failures
+            // A logger that throws is worse than no logger. Give up silently.
         }
     }
 

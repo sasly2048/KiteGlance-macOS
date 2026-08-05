@@ -98,29 +98,40 @@ struct WidgetView: View {
             .opacity(nextBackdrop == nil ? 1 : 1 - backdropOpacity)
     }
 
+    /// `.custom` is a `BackdropMode`, not a `BackdropImage` -- the old
+    /// `image == .custom` compared across two unrelated enums. Whether to use
+    /// the user's file is a property of the *mode*, so it is decided here.
     private func backdropImage(_ image: BackdropImage) -> some View {
         Group {
-            if image == .custom, let customPath = controller.customBackdropPath, let nsImage = NSImage(contentsOfFile: customPath) {
+            if controller.state.backdropMode == .custom,
+               let customPath = controller.customBackdropPath,
+               let nsImage = NSImage(contentsOfFile: customPath) {
+                Image(nsImage: nsImage)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+            } else if let nsImage = Assets.backdrop(image) {
                 Image(nsImage: nsImage)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
             } else {
-                Image(image.rawValue)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
+                // No asset on disk: fall back to the mesh gradient rather than
+                // rendering an empty rectangle.
+                image.fallbackGradient
             }
         }
         .frame(width: 372, height: viewModel.expanded ? compactHeight + paneHeight : compactHeight)
         .clipped()
     }
 
+    @ViewBuilder
     private var grainOverlay: some View {
-        Image("grain")
-            .resizable()
-            .aspectRatio(contentMode: .tile)
-            .frame(width: 372, height: viewModel.expanded ? compactHeight + paneHeight : compactHeight)
-            .opacity(0.028)
-            .blendMode(.overlay)
+        if let grain = Assets.grain {
+            Image(nsImage: grain)
+                .resizable(resizingMode: .tile)
+                .frame(width: 372, height: viewModel.expanded ? compactHeight + paneHeight : compactHeight)
+                .opacity(0.028)
+                .blendMode(.overlay)
+        }
     }
 
     private var topSheen: some View {

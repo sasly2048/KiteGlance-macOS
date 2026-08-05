@@ -11,6 +11,7 @@ class WidgetWindowController: NSWindowController {
     private var autoRefreshTimer: Timer?
     private var sessionCheckTimer: Timer?
     private var tickerTimer: Timer?
+    private var settingsController: SettingsWindowController?
 
     init() {
         self.viewModel = PortfolioViewModel()
@@ -132,7 +133,7 @@ class WidgetWindowController: NSWindowController {
     private func startTimers() {
         // 20-second ticker for sync label and backdrop
         tickerTimer = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.updateSyncLabel(); self?.updateBackdrop() }
+            Task { @MainActor in self?.tick() }
         }
 
         // Hourly session check
@@ -171,21 +172,28 @@ class WidgetWindowController: NSWindowController {
     }
 
     func bootstrap() async {
-        // Restore expanded state
-        viewModel.expanded = state.isExpanded
+        viewModel.activeTab = state.activeTab
 
-        if await kiteService.apiKey.isEmpty {
+        // `apiKey` is private to the actor; `hasApiKey()` is the accessor.
+        guard await kiteService.hasApiKey() else {
             viewModel.showConnectOverlay()
             return
         }
 
-        if !(await kiteService.isAuthenticated()) {
+        guard await kiteService.isAuthenticated() else {
             viewModel.showLoginOverlay()
             return
         }
 
         await fetchPortfolio()
-        if state.isExpanded { toggleExpanded() }
+
+        // Restore the expanded pane by driving the same toggle the user would,
+        // so the window frame and the view model agree. Setting
+        // `viewModel.expanded` here as well would double-toggle and open a
+        // previously-expanded widget collapsed.
+        if state.isExpanded && !viewModel.expanded {
+            toggleExpanded()
+        }
     }
 
     func fetchPortfolio() async {
@@ -196,10 +204,12 @@ class WidgetWindowController: NSWindowController {
             let portfolio = try await kiteService.getPortfolio()
             viewModel.portfolio = portfolio
             viewModel.lastSync = Date()
-            viewModel.usingStaleNavs = kiteService.usingStaleFundNavs
+            viewModel.usingStaleNavs = await kiteService.usingStaleFundNavs
             viewModel.errorMessage = nil
             viewModel.hideOverlay()
-        } catch let error as KiteError where error.message.contains("expired") || error.message.contains("TokenException") {
+        } catch let error as KiteError where error.isAuthFailure {
+            // Typed, not string-matched: the old `message.contains("expired")`
+            // broke the moment Kite reworded its error text.
             viewModel.showLoginOverlay(reason: "Your session expired for the day. Sign in again.")
         } catch {
             viewModel.errorMessage = error.localizedDescription
@@ -250,21 +260,29 @@ class WidgetWindowController: NSWindowController {
     }
 
     func showSettings() {
-        let settingsWindow = SettingsWindow(kiteService: kiteService) { [weak self] in
-            Task { @MainActor in
-                await self?.kiteService.reloadCredentials()
-                await self?.fetchPortfolio()
+        // Held for the window's lifetime. A local NSWindowController is
+        // deallocated at the end of this method, taking its window with it, so
+        // the settings pane would flash and vanish.
+        if settingsController == nil {
+            settingsController = SettingsWindowController(kiteService: kiteService) { [weak self] in
+                Task { @MainActor in
+                    guard let self else { return }
+                    await self.kiteService.reloadCredentials()
+                    await self.bootstrap()
+                }
             }
+            settingsController?.window?.isReleasedWhenClosed = false
         }
-        let controller = NSWindowController(window: settingsWindow)
-        controller.showWindow(nil)
+
+        settingsController?.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
     func signIn() async {
-        viewModel.overlayActionTitle = "Waiting for Kite..."
+        viewModel.overlayActionTitle = "Waiting for Kite…"
         do {
-            let token = try await LoginServer().captureRequestToken(loginURL: kiteService.loginURL)
+            let url = await kiteService.loginURL
+            let token = try await LoginServer().captureRequestToken(loginURL: url)
             try await kiteService.authenticate(requestToken: token)
             viewModel.hideOverlay()
             await fetchPortfolio()
@@ -278,28 +296,36 @@ class WidgetWindowController: NSWindowController {
         window?.performDrag(with: event)
     }
 
-    private func updateSyncLabel() {
-        // viewModel.syncLabel is computed property
-        objectWillChange.send()
-    }
-
-    private func updateBackdrop() {
-        // Trigger backdrop refresh in view
-        objectWillChange.send()
+    /// The view observes `viewModel`, not this controller (an NSWindowController
+    /// is not an ObservableObject), so the old `objectWillChange.send()` here
+    /// redrew nothing and the "2m ago" label never advanced. Poking a published
+    /// property on the view model is what actually invalidates the view.
+    private func tick() {
+        viewModel.clockTick &+= 1
     }
 }
 
 class WidgetWindow: NSWindow {
     weak var controller: WidgetWindowController?
 
+    /// The drag strip along the top of the widget, in points. Everything below
+    /// it belongs to SwiftUI.
+    private let dragHandleHeight: CGFloat = 44
+
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 
     override func mouseDown(with event: NSEvent) {
-        // Allow drag from header area
-        let location = convert(event.locationInWindow, to: nil)
-        if let view = contentView?.hitTest(location), view is NSHostingView<WidgetView> {
-            controller?.handleDrag(event)
+        // The old test asked whether the hit view was the NSHostingView -- which
+        // is the entire window -- so every click anywhere, including on buttons
+        // and tabs, started a window drag. Only the header strip drags.
+        //
+        // locationInWindow is bottom-left origin, so the header is the *top*
+        // `dragHandleHeight` points of the frame.
+        let isInHeader = event.locationInWindow.y >= frame.height - dragHandleHeight
+
+        if isInHeader {
+            performDrag(with: event)
         } else {
             super.mouseDown(with: event)
         }

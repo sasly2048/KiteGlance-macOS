@@ -10,9 +10,9 @@ enum BackdropImage: String, CaseIterable {
     case night = "backdrop-night"
     case midnight = "backdrop-midnight"
 
-    static var allCases: [BackdropImage] {
-        [.dawn, .sunrise, .day, .noon, .dusk, .evening, .night, .midnight]
-    }
+    // `allCases` is synthesized by CaseIterable in declaration order, which is
+    // already day order. Redeclaring it here conflicted with the synthesized
+    // conformance.
 
     var displayName: String {
         switch self {
@@ -33,8 +33,8 @@ struct BackdropService {
         switch mode {
         case .timeOfDay: return byHour(date)
         case .rotate: return byRotation(date)
-        case .static: return .day
-        case .custom: return .day
+        // Custom mode is not answered here -- the caller uses the user's file.
+        case .static, .custom: return .day
         }
     }
 

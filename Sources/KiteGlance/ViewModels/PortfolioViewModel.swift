@@ -43,16 +43,24 @@ struct Money {
 
         var s = raw.trimmingCharacters(in: .whitespaces)
 
-        let patterns = [
-            #"\s*[-\u2013]?\s*(DIRECT|REGULAR)\s+PLAN\b"#,
-            #"\s*[-\u2013]?\s*(GROWTH|IDCW|DIVIDEND)(\s+OPTION)?\b"#,
-            #"\bFUND OF FUND\b"#,
-            #"\s*[-\u2013]\s*$"#,
-            #"\s{2,}"#
+        // Ordered (pattern, replacement) pairs. The old version decided the
+        // replacement by testing the *pattern* string for "FUND OF FUND", and
+        // collapsed `\s{2,}` to "" instead of " " -- which welded words
+        // together ("HDFC  Top 100" became "HDFCTop 100").
+        let substitutions: [(pattern: String, replacement: String)] = [
+            (#"\s*[-\u{2013}]?\s*(DIRECT|REGULAR)\s+PLAN\b"#, ""),
+            (#"\s*[-\u{2013}]?\s*(GROWTH|IDCW|DIVIDEND)(\s+OPTION)?\b"#, ""),
+            (#"\bFUND OF FUND\b"#, "FoF"),
+            (#"\s*[-\u{2013}]\s*$"#, ""),
+            (#"\s{2,}"#, " ")
         ]
 
-        for pattern in patterns {
-            s = s.replacingOccurrences(of: pattern, with: pattern.contains("FUND OF FUND") ? "FoF" : "", options: [.regularExpression, .caseInsensitive])
+        for (pattern, replacement) in substitutions {
+            s = s.replacingOccurrences(
+                of: pattern,
+                with: replacement,
+                options: [.regularExpression, .caseInsensitive]
+            )
         }
         s = s.trimmingCharacters(in: .whitespaces)
 
@@ -76,9 +84,14 @@ struct Money {
     }
 }
 
-@MainActor
-class HoldingViewModel: Identifiable, ObservableObject {
-    let id = UUID()
+/// A struct, not an `ObservableObject`. The old class minted a fresh `UUID` in
+/// every initializer, and `holdingsViewModels` rebuilt the whole array on each
+/// access -- so SwiftUI saw an entirely new identity set on every render and
+/// threw away row animations and hover state. Value semantics plus the stable
+/// `Holding.id` let the diffing algorithm recognise the same row across
+/// refreshes.
+struct HoldingViewModel: Identifiable, Equatable {
+    let id: String
     let rawSymbol: String
     let qty: Decimal
     let avgPrice: Decimal
@@ -87,10 +100,11 @@ class HoldingViewModel: Identifiable, ObservableObject {
     let awaitingPrice: Bool
     let apiPnl: Decimal?
 
-    @Published var symbol: String
-    @Published var pnlColor: Color
+    let symbol: String
+    let pnlColor: Color
 
     init(holding: Holding) {
+        self.id = holding.id
         self.rawSymbol = holding.symbol
         self.qty = holding.qty
         self.avgPrice = holding.avgPrice
@@ -134,17 +148,21 @@ class HoldingViewModel: Identifiable, ObservableObject {
 
 @MainActor
 class PortfolioViewModel: ObservableObject {
-    @Published var portfolio: PortfolioData?
+    @Published var portfolio: PortfolioData? { didSet { rebuildHoldings() } }
     @Published var isLoading = false
     @Published var errorMessage: String?
     @Published var lastSync: Date?
     @Published var usingStaleNavs = false
     @Published var expanded = false
-    @Published var activeTab = "stocks"
+    @Published var activeTab = "stocks" { didSet { rebuildHoldings() } }
     @Published var showOverlay = false
     @Published var overlayTitle = ""
     @Published var overlayBody = ""
     @Published var overlayActionTitle = ""
+    /// Bumped by the controller's 20-second timer. `syncLabel` and the backdrop
+    /// are computed from the wall clock, so something observable has to change
+    /// for SwiftUI to recompute them.
+    @Published var clockTick: UInt64 = 0
     var overlayAction: (() -> Void)?
 
     var stocks: [Holding] {
@@ -159,10 +177,16 @@ class PortfolioViewModel: ObservableObject {
         activeTab == "funds" ? funds : stocks
     }
 
-    var holdingsViewModels: [HoldingViewModel] {
-        currentHoldings
+    /// Rebuilt only when the portfolio or tab actually changes. As a computed
+    /// property this re-sorted and re-allocated the whole list on every access,
+    /// and it is read from both the SwiftUI body and the window-resize math --
+    /// several times per frame.
+    private(set) var holdingsViewModels: [HoldingViewModel] = []
+
+    private func rebuildHoldings() {
+        holdingsViewModels = currentHoldings
             .sorted { abs($0.pnl) > abs($1.pnl) }
-            .map { HoldingViewModel(holding: $0) }
+            .map(HoldingViewModel.init(holding:))
     }
 
     var invested: Decimal {
@@ -195,12 +219,14 @@ class PortfolioViewModel: ObservableObject {
         heroValue >= 0 ? Color(red: 0x32/255, green: 0xD7/255, blue: 0x4B/255) : Color(red: 0xFF/255, green: 0x45/255, blue: 0x3A/255)
     }
 
+    /// NSE cash session: Mon-Fri, 09:15-15:30 IST. Explicitly Gregorian --
+    /// `Calendar.current` follows the user's locale, and a non-Gregorian
+    /// calendar numbers weekdays differently, so `weekday != 1 && weekday != 7`
+    /// would silently stop meaning "not a weekend".
     var isMarketOpen: Bool {
-        let ist = TimeZone(identifier: "Asia/Kolkata")!
-        let now = Date()
-        var cal = Calendar.current
-        cal.timeZone = ist
-        let components = cal.dateComponents([.weekday, .hour, .minute], from: now)
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "Asia/Kolkata")!
+        let components = cal.dateComponents([.weekday, .hour, .minute], from: Date())
 
         guard let weekday = components.weekday, weekday != 1 && weekday != 7 else { return false }
         guard let hour = components.hour, let minute = components.minute else { return false }
