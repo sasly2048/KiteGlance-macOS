@@ -1,0 +1,33 @@
+# Build artifacts
+.build/
+dist/
+*.app/
+*.dmg
+
+# IDE
+.vscode/
+.idea/
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
+
+# macOS
+.DS_Store
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local
+
+# Credentials (never commit)
+*vault*
+*token*
+*credential*
+
+# Test outputs
+*.xctestresult
+coverage/
