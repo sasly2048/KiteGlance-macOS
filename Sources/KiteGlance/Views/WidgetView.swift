@@ -164,9 +164,10 @@ struct WidgetView: View {
     }
 
     private var accentWash: some View {
-        let color = viewModel.heroColor
+        // The `let` above the gradient made this a multi-statement body with no
+        // `return`, so it inferred nothing and failed to compile.
         RadialGradient(
-            gradient: Gradient(colors: [color.opacity(0.18), .clear]),
+            gradient: Gradient(colors: [viewModel.heroColor.opacity(0.18), .clear]),
             center: .topLeading,
             startRadius: 0,
             endRadius: 400

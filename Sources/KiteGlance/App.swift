@@ -14,6 +14,10 @@ struct KiteGlanceApp {
     }
 }
 
+/// `@MainActor` because every member touches AppKit. Under Swift 6's strict
+/// concurrency, `NSApplicationDelegate` conformance alone does not confer main
+/// actor isolation, so each `NSStatusItem` / window call was an error.
+@MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var widgetController: WidgetWindowController?
     private var statusItem: NSStatusItem?
@@ -70,7 +74,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         pinMenu.addItem(NSMenuItem(title: "Pin to Desktop", action: #selector(setPinDesktop), keyEquivalent: ""))
         pinMenu.addItem(NSMenuItem(title: "Always on Top", action: #selector(setPinAlwaysOnTop), keyEquivalent: ""))
         pinMenu.addItem(NSMenuItem(title: "Float Freely", action: #selector(setPinNormal), keyEquivalent: ""))
-        let pinItem = NSMenuItem(title: "Pin Mode", submenu: pinMenu)
+        // NSMenuItem has no `submenu:` initializer; the submenu is assigned
+        // after construction.
+        let pinItem = NSMenuItem(title: "Pin Mode", action: nil, keyEquivalent: "")
+        pinItem.submenu = pinMenu
         menu.addItem(pinItem)
 
         let backdropMenu = NSMenu()
@@ -79,7 +86,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         backdropMenu.addItem(NSMenuItem(title: "Graphite (Static)", action: #selector(setBackdropStatic), keyEquivalent: ""))
         backdropMenu.addItem(NSMenuItem.separator())
         backdropMenu.addItem(NSMenuItem(title: "Choose Image…", action: #selector(chooseCustomBackdrop), keyEquivalent: ""))
-        let backdropItem = NSMenuItem(title: "Background", submenu: backdropMenu)
+        let backdropItem = NSMenuItem(title: "Background", action: nil, keyEquivalent: "")
+        backdropItem.submenu = backdropMenu
         menu.addItem(backdropItem)
 
         menu.addItem(NSMenuItem.separator())
@@ -89,7 +97,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Quit stays untargeted so it walks up to NSApp; everything else points
         // at this delegate.
-        for item in menu.itemArray + menu.itemArray.compactMap(\.submenu).flatMap(\.itemArray)
+        for item in menu.items + menu.items.compactMap(\.submenu).flatMap(\.items)
         where item.action != #selector(NSApplication.terminate(_:)) {
             item.target = self
         }

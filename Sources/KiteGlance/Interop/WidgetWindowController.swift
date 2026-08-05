@@ -3,6 +3,17 @@ import SwiftUI
 import KiteGlanceCore
 import os.log
 
+extension NSWindow.Level {
+    /// Just above the desktop wallpaper and below the desktop icons -- where a
+    /// pinned widget belongs. AppKit ships `.normal`, `.floating`,
+    /// `.statusBar` and friends but no `.desktop`; it has to be built from the
+    /// CoreGraphics constant. This is the entire macOS answer to the ~250 lines
+    /// of WorkerW reparenting in the Windows DesktopPin.cs.
+    static let desktopWidget = NSWindow.Level(
+        rawValue: Int(CGWindowLevelForKey(.desktopWindow)) + 1
+    )
+}
+
 class WidgetWindowController: NSWindowController, NSWindowDelegate {
     private let logger = Logger(subsystem: "com.kiteglance", category: "WidgetWindow")
     private var hostingView: NSHostingView<WidgetView>?
@@ -25,7 +36,7 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
             defer: false
         )
         window.controller = self
-        window.level = .desktop
+        window.level = .desktopWidget
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         window.isOpaque = false
         window.backgroundColor = .clear
@@ -115,7 +126,7 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
 
         switch state.pinMode {
         case .desktop:
-            window.level = .desktop
+            window.level = .desktopWidget
             window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         case .alwaysOnTop:
             window.level = .floating

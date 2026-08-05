@@ -9,6 +9,10 @@ import KiteGlanceCore
 /// instead. Every backdrop reference therefore has to go through an explicit
 /// bundle lookup. The previous code used the asset-catalog form and silently
 /// rendered nothing.
+/// `@MainActor` so the image cache is not nonisolated global mutable state,
+/// which Swift 6 rejects. Every caller is a SwiftUI view body, already on the
+/// main actor, so this costs nothing.
+@MainActor
 enum Assets {
     private static var cache: [String: NSImage] = [:]
 
