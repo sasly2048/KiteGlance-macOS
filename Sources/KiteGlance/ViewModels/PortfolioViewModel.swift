@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import KiteGlanceCore
 
 extension Decimal {
     var doubleValue: Double { NSDecimalNumber(decimal: self).doubleValue }
@@ -38,49 +39,9 @@ struct Money {
         "\(rs)\(value.formatted(.number.grouping(.automatic).precision(.fractionLength(2))))"
     }
 
+    /// Lives in KiteGlanceCore so it can be unit tested without AppKit.
     static func prettyName(_ raw: String) -> String {
-        guard !raw.trimmingCharacters(in: .whitespaces).isEmpty else { return "Unnamed" }
-
-        var s = raw.trimmingCharacters(in: .whitespaces)
-
-        // Ordered (pattern, replacement) pairs. The old version decided the
-        // replacement by testing the *pattern* string for "FUND OF FUND", and
-        // collapsed `\s{2,}` to "" instead of " " -- which welded words
-        // together ("HDFC  Top 100" became "HDFCTop 100").
-        let substitutions: [(pattern: String, replacement: String)] = [
-            (#"\s*[-\u{2013}]?\s*(DIRECT|REGULAR)\s+PLAN\b"#, ""),
-            (#"\s*[-\u{2013}]?\s*(GROWTH|IDCW|DIVIDEND)(\s+OPTION)?\b"#, ""),
-            (#"\bFUND OF FUND\b"#, "FoF"),
-            (#"\s*[-\u{2013}]\s*$"#, ""),
-            (#"\s{2,}"#, " ")
-        ]
-
-        for (pattern, replacement) in substitutions {
-            s = s.replacingOccurrences(
-                of: pattern,
-                with: replacement,
-                options: [.regularExpression, .caseInsensitive]
-            )
-        }
-        s = s.trimmingCharacters(in: .whitespaces)
-
-        let keepUpper = Set([
-            "HDFC", "ICICI", "SBI", "UTI", "ETF", "FOF", "NAV", "IT", "PSU", "FMCG",
-            "NIFTY", "BSE", "NSE", "IDFC", "DSP", "PGIM", "LIC", "AMC", "REIT",
-            "US", "UK", "GDP", "IPO", "ELSS", "NFO", "TATA", "L&T", "HSBC", "JM",
-            "IDCW", "G-SEC", "SENSEX"
-        ])
-
-        return s.split(separator: " ").map { word in
-            let bare = word.trimmingCharacters(in: CharacterSet(charactersIn: "()-,"))
-            if keepUpper.contains(bare.uppercased()) || (bare.count <= 2 && bare.allSatisfy({ $0.isUppercase })) {
-                return bare.uppercased()
-            } else if bare.count == 1 {
-                return bare.uppercased()
-            } else {
-                return bare.prefix(1).uppercased() + bare.dropFirst().lowercased()
-            }
-        }.joined(separator: " ")
+        FundNameFormatter.prettyName(raw)
     }
 }
 

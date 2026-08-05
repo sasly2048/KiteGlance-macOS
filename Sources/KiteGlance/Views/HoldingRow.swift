@@ -1,7 +1,9 @@
 import SwiftUI
 
 struct HoldingRow: View {
-    @ObservedObject var viewModel: HoldingViewModel
+    /// A plain value, not `@ObservedObject`: `HoldingViewModel` is a struct now,
+    /// rebuilt from the portfolio whenever it changes.
+    let viewModel: HoldingViewModel
     @State private var isHovered = false
 
     var body: some View {

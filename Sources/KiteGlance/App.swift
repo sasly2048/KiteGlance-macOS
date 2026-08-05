@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import KiteGlanceCore
 import os.log
 
 @main
@@ -105,10 +106,5 @@ enum PinMode: String, CaseIterable, Codable {
     case desktop = "Pin to Desktop"
 }
 
-enum BackdropMode: String, CaseIterable, Codable {
-    case timeOfDay = "Time of Day"
-    case rotate = "Rotate"
-    /// `static` is a Swift keyword, so the case name needs backticks.
-    case `static` = "Graphite (Static)"
-    case custom = "Custom"
-}
+// `BackdropMode` lives in KiteGlanceCore so BackdropService and its tests can
+// reach it without importing this executable target.

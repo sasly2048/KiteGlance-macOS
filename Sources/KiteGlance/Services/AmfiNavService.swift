@@ -1,4 +1,5 @@
 import Foundation
+import KiteGlanceCore
 import os.log
 
 actor AmfiNavService {
@@ -95,28 +96,10 @@ actor AmfiNavService {
         try? text.write(to: url, atomically: true, encoding: .utf8)
     }
 
+    /// Delegates to the parser in KiteGlanceCore so the format is covered by
+    /// tests rather than only exercised against the live feed.
     private func parseNavs(_ text: String) -> [String: Decimal] {
-        var map: [String: Decimal] = [:]
-        map.reserveCapacity(20_000)
-
-        text.enumerateLines { line, _ in
-            guard line.count >= 20, line.contains(";"),
-                  !line.hasPrefix("Scheme Code") else { return }
-
-            let parts = line.split(separator: ";", maxSplits: 4, omittingEmptySubsequences: false)
-            guard parts.count >= 5 else { return }
-
-            let navText = parts[4].trimmingCharacters(in: .whitespaces)
-            guard let nav = Decimal(string: navText), nav > 0 else { return }
-
-            let isinGrowth = parts[1].trimmingCharacters(in: .whitespaces)
-            let isinReinvest = parts[2].trimmingCharacters(in: .whitespaces)
-
-            if isinGrowth.count == 12 { map[isinGrowth] = nav }
-            if isinReinvest.count == 12 { map[isinReinvest] = nav }
-        }
-
-        return map
+        NavParser.parse(text)
     }
 
     /// Explicitly Gregorian: `Calendar.current` follows the user's locale, and a

@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import KiteGlanceCore
 import os.log
 
 actor KiteService {

@@ -25,11 +25,15 @@ let package = Package(
             name: "KiteGlance",
             dependencies: ["KiteGlanceCore"],
             path: "Sources/KiteGlance",
-            exclude: ["Info.plist"],
+            exclude: ["Info.plist", "Assets/Backdrops/README.md"],
             resources: [
-                // `Assets/Icons` was listed here but does not exist, which is a
-                // hard error in SwiftPM. Only declare directories that are real.
-                .process("Assets/Backdrops")
+                // `Assets/Icons` was also listed here but does not exist, which
+                // is a hard error in SwiftPM. Only declare real directories.
+                //
+                // The PNGs are generated (`swift run generate-assets`) and
+                // gitignored, so this directory is empty in a fresh clone --
+                // `.copy` tolerates that, and the app falls back to gradients.
+                .copy("Assets/Backdrops")
             ],
             swiftSettings: [
                 .define("RELEASE", .when(configuration: .release))

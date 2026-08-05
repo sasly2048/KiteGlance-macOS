@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import KiteGlanceCore
 import os.log
 
 class WidgetWindowController: NSWindowController {

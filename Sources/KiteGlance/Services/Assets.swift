@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import KiteGlanceCore
 
 /// Resource loading for a SwiftPM executable.
 ///
@@ -25,8 +26,13 @@ enum Assets {
     private static func load(named name: String) -> NSImage? {
         if let cached = cache[name] { return cached }
 
-        guard let url = Bundle.module.url(forResource: name, withExtension: "png")
-                ?? Bundle.module.url(forResource: name, withExtension: "jpg"),
+        // `.copy("Assets/Backdrops")` preserves the directory, so resources land
+        // under that subdirectory rather than at the bundle root.
+        guard let url = Bundle.module.url(
+                forResource: name,
+                withExtension: "png",
+                subdirectory: "Backdrops"
+              ) ?? Bundle.module.url(forResource: name, withExtension: "png"),
               let image = NSImage(contentsOf: url) else {
             return nil
         }

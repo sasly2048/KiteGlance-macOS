@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import KiteGlanceCore
 
 struct WidgetState: Codable {
     var position: CGPoint = .zero
@@ -9,11 +10,8 @@ struct WidgetState: Codable {
     var backdropMode: BackdropMode = .timeOfDay
     var customBackdropPath: String?
     var lastSync: Date?
-    var windowLevel: WindowLevel = .desktop
-
-    enum WindowLevel: String, Codable {
-        case desktop, normal, floating, statusBar
-    }
+    // `windowLevel` removed: it was persisted but never read. `pinMode` is what
+    // actually drives the window level.
 
     private static let fileName = "widget-state.json"
 

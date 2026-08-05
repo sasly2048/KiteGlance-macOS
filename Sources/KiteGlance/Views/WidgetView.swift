@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import KiteGlanceCore
 
 struct WidgetView: View {
     @ObservedObject var viewModel: PortfolioViewModel
@@ -71,13 +72,12 @@ struct WidgetView: View {
         }
         .frame(width: 372, height: viewModel.expanded ? compactHeight + paneHeight : compactHeight)
         .background(Color.clear)
-        .onAppear {
-            Task { await initialize() }
-        }
-        .onChange(of: viewModel.expanded) { _, newValue in
-            withAnimation(.spring(response: 0.44, dampingFraction: 0.8)) {
-                // Height animation handled by window controller
-            }
+        .task { await initialize() }
+        // The controller's 20-second timer bumps `clockTick`; the sync label and
+        // the backdrop are both wall-clock derived, so this is what makes them
+        // advance.
+        .onChange(of: viewModel.clockTick) { _, _ in
+            refreshBackdrop()
         }
     }
 
@@ -519,11 +519,7 @@ struct WidgetView: View {
     }
 
     private func initialize() async {
-        // Load backdrop
-        currentBackdrop = BackdropService.pick(mode: controller.state.backdropMode)
-        if controller.state.backdropMode == .custom {
-            // Custom backdrop will be handled by backdropImage
-        }
+        refreshBackdrop()
 
         // Start breathing animation if market open
         if viewModel.isMarketOpen {
@@ -540,13 +536,19 @@ struct WidgetView: View {
         }
     }
 
-    private func startBreathing() {
-        breathAnimation = true
+    /// Re-picks the backdrop for the current clock. Driven by the controller's
+    /// 20-second tick, so the widget actually walks through the day instead of
+    /// keeping whatever image it launched with.
+    func refreshBackdrop() {
+        let picked = BackdropService.pick(mode: controller.state.backdropMode)
+        guard picked != currentBackdrop else { return }
+
+        withAnimation(.easeInOut(duration: 0.9)) {
+            currentBackdrop = picked
+        }
     }
 
-    // State access for backdrop
-    var state: WidgetState? {
-        // Access via controller
-        nil
+    private func startBreathing() {
+        breathAnimation = true
     }
 }

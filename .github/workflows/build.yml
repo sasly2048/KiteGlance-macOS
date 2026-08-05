@@ -3,19 +3,8 @@ name: Build
 on:
   push:
     branches: [main]
-    paths:
-      - 'Sources/**'
-      - 'scripts/**'
-      - 'Package.swift'
   pull_request:
     branches: [main]
-    paths:
-      - 'Sources/**'
-      - 'scripts/**'
-      - 'Package.swift'
-
-env:
-  DEVELOPER_DIR: /Applications/Xcode_16.app/Contents/Developer
 
 jobs:
   build:
@@ -27,23 +16,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_16.app/Contents/Developer
-
       - name: Show Swift version
         run: swift --version
 
-      - name: Generate assets
-        run: swift run --package-path . generate-assets
-
       - name: Build debug
-        run: swift build --package-path . -c debug
-
-      - name: Build release
-        run: swift build --package-path . -c release
+        run: swift build -c debug
 
       - name: Run tests
-        run: swift test --package-path .
+        run: swift test
+
+      - name: Build release
+        run: swift build -c release --arch arm64
 
       - name: Upload release binary
         uses: actions/upload-artifact@v4
@@ -60,14 +43,20 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Download artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: KiteGlance-macos-arm64
-          path: dist/
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # A bare Mach-O binary is not something a user can install: Gatekeeper
+      # blocks it and there is no bundle for the Info.plist or icon. Build the
+      # real .app and ship a zip of it.
+      - name: Build app bundle
+        run: ./scripts/build-app.sh
+
+      - name: Zip app bundle
+        run: ditto -c -k --keepParent dist/KiteGlance.app dist/KiteGlance-macos-arm64.zip
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
-          files: dist/KiteGlance
+          files: dist/KiteGlance-macos-arm64.zip
           generate_release_notes: true

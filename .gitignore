@@ -23,10 +23,17 @@ DerivedData/
 .env
 .env.local
 
-# Credentials (never commit)
-*vault*
-*token*
-*credential*
+# Credentials (never commit). Scoped to data files -- the bare `*vault*` /
+# `*credential*` globs also swallowed Sources/KiteGlance/Services/
+# CredentialVault.swift, so the Keychain layer silently never got committed.
+*.vault
+vault.bin
+token.bin
+*.credentials
+
+# Generated assets (run `swift run generate-assets`)
+Sources/KiteGlance/Assets/Backdrops/*.png
+Sources/KiteGlance/Assets/Icons/
 
 # Test outputs
 *.xctestresult
