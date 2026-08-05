@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import KiteGlanceCore
 import os.log
 
 @main
@@ -13,6 +14,10 @@ struct KiteGlanceApp {
     }
 }
 
+/// `@MainActor` because every member touches AppKit. Under Swift 6's strict
+/// concurrency, `NSApplicationDelegate` conformance alone does not confer main
+/// actor isolation, so each `NSStatusItem` / window call was an error.
+@MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var widgetController: WidgetWindowController?
     private var statusItem: NSStatusItem?
@@ -20,6 +25,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         logger.info("KiteGlance starting")
+
+        // Parity with the Windows single-instance mutex: two widgets would fight
+        // over the same state file and double every API call. NSRunningApplication
+        // is the macOS equivalent -- a second copy defers to the first.
+        if isAlreadyRunning() {
+            logger.info("Another instance is already running; exiting")
+            NSApp.terminate(nil)
+            return
+        }
+
+        // A leftover API dump from a previous debug session must not outlive it.
+        ApiDump.purgeIfDisabled()
 
         setupStatusItem()
         createWidgetWindow()
@@ -42,7 +59,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem?.menu = buildStatusMenu()
     }
 
-    private func buildStatusMenu() -> NSMenu {
+    /// Also used by the widget's `⋯` button, so the two menus can never drift
+    /// apart. Every item targets a selector on this object, so the menu has to be
+    /// built here; `target` is set explicitly because a menu shown via `popUp`
+    /// is outside the responder chain that the status item relies on.
+    func buildStatusMenu() -> NSMenu {
         let menu = NSMenu()
 
         menu.addItem(NSMenuItem(title: "Show Widget", action: #selector(toggleWidget), keyEquivalent: ""))
@@ -53,7 +74,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         pinMenu.addItem(NSMenuItem(title: "Pin to Desktop", action: #selector(setPinDesktop), keyEquivalent: ""))
         pinMenu.addItem(NSMenuItem(title: "Always on Top", action: #selector(setPinAlwaysOnTop), keyEquivalent: ""))
         pinMenu.addItem(NSMenuItem(title: "Float Freely", action: #selector(setPinNormal), keyEquivalent: ""))
-        let pinItem = NSMenuItem(title: "Pin Mode", submenu: pinMenu)
+        // NSMenuItem has no `submenu:` initializer; the submenu is assigned
+        // after construction.
+        let pinItem = NSMenuItem(title: "Pin Mode", action: nil, keyEquivalent: "")
+        pinItem.submenu = pinMenu
         menu.addItem(pinItem)
 
         let backdropMenu = NSMenu()
@@ -62,7 +86,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         backdropMenu.addItem(NSMenuItem(title: "Graphite (Static)", action: #selector(setBackdropStatic), keyEquivalent: ""))
         backdropMenu.addItem(NSMenuItem.separator())
         backdropMenu.addItem(NSMenuItem(title: "Choose Image…", action: #selector(chooseCustomBackdrop), keyEquivalent: ""))
-        let backdropItem = NSMenuItem(title: "Background", submenu: backdropMenu)
+        let backdropItem = NSMenuItem(title: "Background", action: nil, keyEquivalent: "")
+        backdropItem.submenu = backdropMenu
         menu.addItem(backdropItem)
 
         menu.addItem(NSMenuItem.separator())
@@ -70,11 +95,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit KiteGlance", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
 
+        // Quit stays untargeted so it walks up to NSApp; everything else points
+        // at this delegate.
+        for item in menu.items + menu.items.compactMap(\.submenu).flatMap(\.items)
+        where item.action != #selector(NSApplication.terminate(_:)) {
+            item.target = self
+        }
+
         return menu
     }
 
     private func createWidgetWindow() {
         widgetController = WidgetWindowController()
+    }
+
+    private func isAlreadyRunning() -> Bool {
+        guard let bundleID = Bundle.main.bundleIdentifier else { return false }
+        return NSRunningApplication
+            .runningApplications(withBundleIdentifier: bundleID)
+            .contains { $0 != .current }
     }
 
     @objc private func toggleWidget() {
@@ -105,9 +144,5 @@ enum PinMode: String, CaseIterable, Codable {
     case desktop = "Pin to Desktop"
 }
 
-enum BackdropMode: String, CaseIterable, Codable {
-    case timeOfDay = "Time of Day"
-    case rotate = "Rotate"
-    case static = "Graphite (Static)"
-    case custom = "Custom"
-}
+// `BackdropMode` lives in KiteGlanceCore so BackdropService and its tests can
+// reach it without importing this executable target.

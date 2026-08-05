@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import KiteGlanceCore
 
 extension Decimal {
     var doubleValue: Double { NSDecimalNumber(decimal: self).doubleValue }
@@ -38,47 +39,20 @@ struct Money {
         "\(rs)\(value.formatted(.number.grouping(.automatic).precision(.fractionLength(2))))"
     }
 
+    /// Lives in KiteGlanceCore so it can be unit tested without AppKit.
     static func prettyName(_ raw: String) -> String {
-        guard !raw.trimmingCharacters(in: .whitespaces).isEmpty else { return "Unnamed" }
-
-        var s = raw.trimmingCharacters(in: .whitespaces)
-
-        let patterns = [
-            #"\s*[-\u2013]?\s*(DIRECT|REGULAR)\s+PLAN\b"#,
-            #"\s*[-\u2013]?\s*(GROWTH|IDCW|DIVIDEND)(\s+OPTION)?\b"#,
-            #"\bFUND OF FUND\b"#,
-            #"\s*[-\u2013]\s*$"#,
-            #"\s{2,}"#
-        ]
-
-        for pattern in patterns {
-            s = s.replacingOccurrences(of: pattern, with: pattern.contains("FUND OF FUND") ? "FoF" : "", options: [.regularExpression, .caseInsensitive])
-        }
-        s = s.trimmingCharacters(in: .whitespaces)
-
-        let keepUpper = Set([
-            "HDFC", "ICICI", "SBI", "UTI", "ETF", "FOF", "NAV", "IT", "PSU", "FMCG",
-            "NIFTY", "BSE", "NSE", "IDFC", "DSP", "PGIM", "LIC", "AMC", "REIT",
-            "US", "UK", "GDP", "IPO", "ELSS", "NFO", "TATA", "L&T", "HSBC", "JM",
-            "IDCW", "G-SEC", "SENSEX"
-        ])
-
-        return s.split(separator: " ").map { word in
-            let bare = word.trimmingCharacters(in: CharacterSet(charactersIn: "()-,"))
-            if keepUpper.contains(bare.uppercased()) || (bare.count <= 2 && bare.allSatisfy({ $0.isUppercase })) {
-                return bare.uppercased()
-            } else if bare.count == 1 {
-                return bare.uppercased()
-            } else {
-                return bare.prefix(1).uppercased() + bare.dropFirst().lowercased()
-            }
-        }.joined(separator: " ")
+        FundNameFormatter.prettyName(raw)
     }
 }
 
-@MainActor
-class HoldingViewModel: Identifiable, ObservableObject {
-    let id = UUID()
+/// A struct, not an `ObservableObject`. The old class minted a fresh `UUID` in
+/// every initializer, and `holdingsViewModels` rebuilt the whole array on each
+/// access -- so SwiftUI saw an entirely new identity set on every render and
+/// threw away row animations and hover state. Value semantics plus the stable
+/// `Holding.id` let the diffing algorithm recognise the same row across
+/// refreshes.
+struct HoldingViewModel: Identifiable, Equatable {
+    let id: String
     let rawSymbol: String
     let qty: Decimal
     let avgPrice: Decimal
@@ -87,10 +61,11 @@ class HoldingViewModel: Identifiable, ObservableObject {
     let awaitingPrice: Bool
     let apiPnl: Decimal?
 
-    @Published var symbol: String
-    @Published var pnlColor: Color
+    let symbol: String
+    let pnlColor: Color
 
     init(holding: Holding) {
+        self.id = holding.id
         self.rawSymbol = holding.symbol
         self.qty = holding.qty
         self.avgPrice = holding.avgPrice
@@ -134,17 +109,24 @@ class HoldingViewModel: Identifiable, ObservableObject {
 
 @MainActor
 class PortfolioViewModel: ObservableObject {
-    @Published var portfolio: PortfolioData?
+    @Published var portfolio: PortfolioData? { didSet { rebuildHoldings() } }
     @Published var isLoading = false
     @Published var errorMessage: String?
     @Published var lastSync: Date?
     @Published var usingStaleNavs = false
     @Published var expanded = false
-    @Published var activeTab = "stocks"
+    @Published var activeTab = "stocks" { didSet { rebuildHoldings() } }
     @Published var showOverlay = false
     @Published var overlayTitle = ""
     @Published var overlayBody = ""
     @Published var overlayActionTitle = ""
+    /// True while a login round-trip is in flight, so the overlay button can be
+    /// disabled rather than starting a second login server on the same port.
+    @Published var isSigningIn = false
+    /// Bumped by the controller's 20-second timer. `syncLabel` and the backdrop
+    /// are computed from the wall clock, so something observable has to change
+    /// for SwiftUI to recompute them.
+    @Published var clockTick: UInt64 = 0
     var overlayAction: (() -> Void)?
 
     var stocks: [Holding] {
@@ -159,10 +141,16 @@ class PortfolioViewModel: ObservableObject {
         activeTab == "funds" ? funds : stocks
     }
 
-    var holdingsViewModels: [HoldingViewModel] {
-        currentHoldings
+    /// Rebuilt only when the portfolio or tab actually changes. As a computed
+    /// property this re-sorted and re-allocated the whole list on every access,
+    /// and it is read from both the SwiftUI body and the window-resize math --
+    /// several times per frame.
+    private(set) var holdingsViewModels: [HoldingViewModel] = []
+
+    private func rebuildHoldings() {
+        holdingsViewModels = currentHoldings
             .sorted { abs($0.pnl) > abs($1.pnl) }
-            .map { HoldingViewModel(holding: $0) }
+            .map(HoldingViewModel.init(holding:))
     }
 
     var invested: Decimal {
@@ -195,12 +183,14 @@ class PortfolioViewModel: ObservableObject {
         heroValue >= 0 ? Color(red: 0x32/255, green: 0xD7/255, blue: 0x4B/255) : Color(red: 0xFF/255, green: 0x45/255, blue: 0x3A/255)
     }
 
+    /// NSE cash session: Mon-Fri, 09:15-15:30 IST. Explicitly Gregorian --
+    /// `Calendar.current` follows the user's locale, and a non-Gregorian
+    /// calendar numbers weekdays differently, so `weekday != 1 && weekday != 7`
+    /// would silently stop meaning "not a weekend".
     var isMarketOpen: Bool {
-        let ist = TimeZone(identifier: "Asia/Kolkata")!
-        let now = Date()
-        var cal = Calendar.current
-        cal.timeZone = ist
-        let components = cal.dateComponents([.weekday, .hour, .minute], from: now)
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "Asia/Kolkata")!
+        let components = cal.dateComponents([.weekday, .hour, .minute], from: Date())
 
         guard let weekday = components.weekday, weekday != 1 && weekday != 7 else { return false }
         guard let hour = components.hour, let minute = components.minute else { return false }
@@ -229,17 +219,37 @@ class PortfolioViewModel: ObservableObject {
         return base
     }
 
-    func showConnectOverlay() {
-        overlayTitle = "Connect Kite"
-        overlayBody = "Add your Kite Connect API key and secret to begin."
-        overlayActionTitle = "Set up"
-        showOverlay = true
+    /// The action is required, not optional. `overlayAction` was previously
+    /// declared but never assigned by either of these, so the only button on the
+    /// first-launch screen did nothing and a new user could not set the app up
+    /// at all. The Windows original passes the callback into `ShowOverlay` at
+    /// every call site; making it a required parameter means the compiler
+    /// enforces that.
+    func showConnectOverlay(onAction: @escaping () -> Void) {
+        presentOverlay(
+            title: "Connect Kite",
+            body: "Add your Kite Connect API key and secret to begin.",
+            actionTitle: "Set up",
+            action: onAction
+        )
     }
 
-    func showLoginOverlay(reason: String? = nil) {
-        overlayTitle = "Sign in"
-        overlayBody = reason ?? "Kite sessions reset each morning. Sign in to sync today's portfolio."
-        overlayActionTitle = "Sign in with Kite"
+    func showLoginOverlay(reason: String? = nil, onAction: @escaping () -> Void) {
+        presentOverlay(
+            title: "Sign in",
+            body: reason ?? "Kite sessions reset each morning. Sign in to sync today's portfolio.",
+            actionTitle: "Sign in with Kite",
+            action: onAction
+        )
+    }
+
+    /// Named `presentOverlay`, not `showOverlay`: the latter is already a
+    /// `@Published var` on this type.
+    private func presentOverlay(title: String, body: String, actionTitle: String, action: @escaping () -> Void) {
+        overlayTitle = title
+        overlayBody = body
+        overlayActionTitle = actionTitle
+        overlayAction = action
         showOverlay = true
     }
 

@@ -1,4 +1,5 @@
 import Foundation
+import KiteGlanceCore
 import os.log
 
 actor AmfiNavService {
@@ -19,8 +20,9 @@ actor AmfiNavService {
     }
 
     func getNav(for isin: String) async -> Decimal? {
-        guard let table = await ensureCache() else { return nil }
-        return table[isin.trimmingCharacters(in: .whitespaces)]
+        let trimmed = isin.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, let table = await ensureCache() else { return nil }
+        return table[trimmed]
     }
 
     func getAllNavs() async -> [String: Decimal]? {
@@ -34,10 +36,12 @@ actor AmfiNavService {
             return cache
         }
 
-        // Try disk cache first
-        if let (diskText, diskTime) = readDiskCache(),
-           isSameISTDay(diskTime, Date()),
-           let parsed = parseNavs(diskText) {
+        // Disk cache: survives restarts, so a cold start paints immediately from
+        // a same-IST-day file instead of blocking on a ~3 MB download. Same-day
+        // data is as authoritative as a fresh fetch -- AMFI publishes once, near
+        // 11 PM IST -- so this path does count as live.
+        if let (diskText, diskTime) = readDiskCache(), isSameISTDay(diskTime, Date()) {
+            let parsed = parseNavs(diskText)
             self.cache = parsed
             self.cachedOn = diskTime
             self.hasLiveNavs = true
@@ -60,14 +64,17 @@ actor AmfiNavService {
             writeDiskCache(text)
             return parsed
         } catch {
-            logger.warning("AMFI fetch failed: \(error.localizedDescription)")
+            logger.warning("AMFI fetch failed: \(error.localizedDescription, privacy: .public)")
 
-            if cache == nil, let (diskText, diskTime) = readDiskCache(),
-               let parsed = parseNavs(diskText) {
+            // Network failed. A day-old NAV still beats Kite's holdings-endpoint
+            // NAV, so prefer a stale disk cache over nothing. But this data is
+            // by definition not today's: `hasLiveNavs` stays false so the UI can
+            // say "fund NAVs delayed" instead of quietly implying they are live.
+            if cache == nil, let (diskText, diskTime) = readDiskCache() {
+                let parsed = parseNavs(diskText)
                 self.cache = parsed
                 self.cachedOn = diskTime
-                self.hasLiveNavs = true
-                logger.info("Using disk cache from \(diskTime.formatted())")
+                logger.info("Using stale disk cache from \(diskTime.formatted(), privacy: .public)")
             }
             return cache
         }
@@ -89,34 +96,19 @@ actor AmfiNavService {
         try? text.write(to: url, atomically: true, encoding: .utf8)
     }
 
+    /// Delegates to the parser in KiteGlanceCore so the format is covered by
+    /// tests rather than only exercised against the live feed.
     private func parseNavs(_ text: String) -> [String: Decimal] {
-        var map: [String: Decimal] = [:]
-        map.reserveCapacity(20_000)
-
-        text.enumerateLines { line, _ in
-            guard line.count >= 20, line.contains(";"),
-                  !line.hasPrefix("Scheme Code") else { return }
-
-            let parts = line.split(separator: ";", maxSplits: 4, omittingEmptySubsequences: false)
-            guard parts.count >= 5 else { return }
-
-            let navText = parts[4].trimmingCharacters(in: .whitespaces)
-            guard let nav = Decimal(string: navText), nav > 0 else { return }
-
-            let isinGrowth = parts[1].trimmingCharacters(in: .whitespaces)
-            let isinReinvest = parts[2].trimmingCharacters(in: .whitespaces)
-
-            if isinGrowth.count == 12 { map[isinGrowth] = nav }
-            if isinReinvest.count == 12 { map[isinReinvest] = nav }
-        }
-
-        return map
+        NavParser.parse(text)
     }
 
+    /// Explicitly Gregorian: `Calendar.current` follows the user's locale, and a
+    /// non-Gregorian calendar (Buddhist, Japanese, Hijri -- all selectable in
+    /// macOS System Settings) yields different year/month/day numbers for the
+    /// same instant, silently breaking cache expiry.
     private func isSameISTDay(_ a: Date, _ b: Date) -> Bool {
-        let ist = TimeZone(identifier: "Asia/Kolkata")!
-        let calA = Calendar.current.dateComponents(in: ist, from: a)
-        let calB = Calendar.current.dateComponents(in: ist, from: b)
-        return calA.year == calB.year && calA.month == calB.month && calA.day == calB.day
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Kolkata")!
+        return calendar.isDate(a, inSameDayAs: b)
     }
 }

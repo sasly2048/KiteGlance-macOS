@@ -52,7 +52,9 @@ err()  { printf "\033[1;31m✗\033[0m %s\n" "$*"; }
 log "Generating assets..."
 cd "$PROJECT_DIR"
 if [[ ! -f "Sources/KiteGlance/Assets/Backdrops/backdrop-dawn.png" ]]; then
-    swift run generate-assets 2>/dev/null || swift scripts/generate-assets.swift
+    # Best-effort: the app falls back to gradients when the PNGs are absent, so
+    # a failure here must not abort the build (the script runs under `set -e`).
+    swift run generate-assets || warn "Asset generation failed; using built-in gradients"
 fi
 ok "Assets ready"
 
@@ -84,37 +86,45 @@ ok "Info.plist updated"
 
 # ── 4. Create App Icon (.icns) ──────────────────────────────────────────
 log "Creating AppIcon.icns..."
-ICONSET_DIR=$(mktemp -d)/AppIcon.iconset
+ICONSET_PARENT=$(mktemp -d)
+ICONSET_DIR="$ICONSET_PARENT/AppIcon.iconset"
 mkdir -p "$ICONSET_DIR"
 
-# Use the generated PNG as source
 SRC_PNG="$PROJECT_DIR/Sources/KiteGlance/Assets/Icons/app-icon.png"
+
+# The previous version wrote a truncated base64 blob into a .png and then
+# reassigned SRC_PNG back to the same missing path, so sips failed on every
+# size and iconutil got an empty iconset. Skip the icon instead of shipping a
+# corrupt one -- a bundle with no icon still launches.
 if [[ ! -f "$SRC_PNG" ]]; then
-    warn "Source icon not found, generating placeholder..."
-    # Create a simple placeholder
-    cat > "$ICONSET_DIR/icon_512x512.png" <<'EOF'
-iVBORw0KGgoAAAANSUhEUgAAAQAAAAEAAQMAAABmvDOLAAAAA1BMVEX///+nxBvIAAAACXBIWXMAAA7EAAAOxAGVKw4bAAAAB3RJTUUH5QsXDx0X0
-EOF
-    # Actually use sips to generate from a simple source
-    SRC_PNG="$PROJECT_DIR/Sources/KiteGlance/Assets/Icons/app-icon.png"
+    warn "No source icon at $SRC_PNG; building without a custom AppIcon"
+else
+    for size in 16 32 64 128 256 512; do
+        sips -z $size $size "$SRC_PNG" --out "$ICONSET_DIR/icon_${size}x${size}.png" >/dev/null 2>&1
+        sips -z $((size*2)) $((size*2)) "$SRC_PNG" --out "$ICONSET_DIR/icon_${size}x${size}@2x.png" >/dev/null 2>&1
+    done
+
+    if iconutil -c icns "$ICONSET_DIR" -o "$APP_BUNDLE/Contents/Resources/AppIcon.icns" 2>/dev/null; then
+        ok "AppIcon.icns created"
+    else
+        warn "iconutil failed; continuing without a custom AppIcon"
+    fi
+fi
+rm -rf "$ICONSET_PARENT"
+
+# ── 5. Copy SwiftPM resource bundle ──────────────────────────────────────
+# SwiftPM emits KiteGlance_KiteGlance.bundle next to the binary. Without it,
+# Bundle.module traps at runtime and every backdrop lookup fails.
+RESOURCE_BUNDLE="$BUILD_DIR/arm64-apple-macosx/release/KiteGlance_KiteGlance.bundle"
+if [[ -d "$RESOURCE_BUNDLE" ]]; then
+    cp -R "$RESOURCE_BUNDLE" "$APP_BUNDLE/Contents/Resources/"
+    ok "Resource bundle copied"
+else
+    warn "Resource bundle not found at $RESOURCE_BUNDLE"
 fi
 
-# Generate all required sizes from source PNG
-for size in 16 32 64 128 256 512 1024; do
-    sips -z $size $size "$SRC_PNG" --out "$ICONSET_DIR/icon_${size}x${size}.png" >/dev/null 2>&1
-    if [[ $size -le 512 ]]; then
-        sips -z $((size*2)) $((size*2)) "$SRC_PNG" --out "$ICONSET_DIR/icon_${size}x${size}@2x.png" >/dev/null 2>&1
-    fi
-done
-
-# Convert to .icns
-iconutil -c icns "$ICONSET_DIR" -o "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
-rm -rf "$(dirname "$ICONSET_DIR")"
-ok "AppIcon.icns created"
-
-# ── 5. Copy Entitlements ────────────────────────────────────────────────
-cp "$PROJECT_DIR/KiteGlance.entitlements" "$APP_BUNDLE/Contents/Resources/KiteGlance.entitlements"
-ok "Entitlements copied"
+# Entitlements are a signing input, not a bundle resource -- shipping them
+# inside Resources/ does nothing but leak the capability list.
 
 # ── 6. Code Sign ────────────────────────────────────────────────────────
 if [[ -n "$SIGN_IDENTITY" ]]; then

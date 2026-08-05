@@ -1,8 +1,20 @@
 import AppKit
 import SwiftUI
+import KiteGlanceCore
 import os.log
 
-class WidgetWindowController: NSWindowController {
+extension NSWindow.Level {
+    /// Just above the desktop wallpaper and below the desktop icons -- where a
+    /// pinned widget belongs. AppKit ships `.normal`, `.floating`,
+    /// `.statusBar` and friends but no `.desktop`; it has to be built from the
+    /// CoreGraphics constant. This is the entire macOS answer to the ~250 lines
+    /// of WorkerW reparenting in the Windows DesktopPin.cs.
+    static let desktopWidget = NSWindow.Level(
+        rawValue: Int(CGWindowLevelForKey(.desktopWindow)) + 1
+    )
+}
+
+class WidgetWindowController: NSWindowController, NSWindowDelegate {
     private let logger = Logger(subsystem: "com.kiteglance", category: "WidgetWindow")
     private var hostingView: NSHostingView<WidgetView>?
     private var viewModel: PortfolioViewModel
@@ -11,6 +23,8 @@ class WidgetWindowController: NSWindowController {
     private var autoRefreshTimer: Timer?
     private var sessionCheckTimer: Timer?
     private var tickerTimer: Timer?
+    private var settingsController: SettingsWindowController?
+    private var saveDebounce: Task<Void, Never>?
 
     init() {
         self.viewModel = PortfolioViewModel()
@@ -21,8 +35,7 @@ class WidgetWindowController: NSWindowController {
             backing: .buffered,
             defer: false
         )
-        window.controller = self
-        window.level = .desktop
+        window.level = .desktopWidget
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         window.isOpaque = false
         window.backgroundColor = .clear
@@ -35,6 +48,9 @@ class WidgetWindowController: NSWindowController {
 
         super.init(window: window)
 
+        // Both assignments pass `self`, so they have to follow super.init.
+        window.controller = self
+        window.delegate = self
         setupView()
         restorePosition()
         applyPinMode()
@@ -44,6 +60,9 @@ class WidgetWindowController: NSWindowController {
     var customBackdropPath: String? {
         state.customBackdropPath
     }
+
+    var isExpanded: Bool { viewModel.expanded }
+    var activeTab: String { viewModel.activeTab }
 
     required init?(coder: NSCoder) { fatalError() }
 
@@ -80,17 +99,39 @@ class WidgetWindowController: NSWindowController {
         state.save()
     }
 
+    /// Debounced position save, matching the Windows `Debounce(600ms)`. Dragging
+    /// emits a continuous stream of frame changes; writing the JSON on each one
+    /// would hammer the disk. Without this the position was only persisted at
+    /// shutdown, so a crash or force-quit lost it entirely.
+    func queueSavePosition() {
+        saveDebounce?.cancel()
+        saveDebounce = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(600))
+            guard !Task.isCancelled else { return }
+            self?.savePosition()
+        }
+    }
+
+    /// The macOS counterpart of DesktopPin.cs. Windows needs ~250 lines for this
+    /// -- rewriting WINDOWPOS in a WndProc hook, or reparenting into Explorer's
+    /// WorkerW -- because there is no window level below the desktop icons.
+    /// AppKit exposes exactly that as a level, so the whole feature is these few
+    /// assignments.
     func applyPinMode() {
         guard let window else { return }
 
+        // Keeps the widget out of the window menu in every mode, matching
+        // WS_EX_TOOLWINDOW on Windows (which also drops it from Alt+Tab).
+        window.isExcludedFromWindowsMenu = true
+        window.ignoresMouseEvents = false
+
         switch state.pinMode {
         case .desktop:
-            window.level = .desktop
+            window.level = .desktopWidget
             window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
-            window.ignoresMouseEvents = false
         case .alwaysOnTop:
             window.level = .floating
-            window.collectionBehavior = [.canJoinAllSpaces, .stationary]
+            window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         case .normal:
             window.level = .normal
             window.collectionBehavior = [.canJoinAllSpaces]
@@ -132,7 +173,7 @@ class WidgetWindowController: NSWindowController {
     private func startTimers() {
         // 20-second ticker for sync label and backdrop
         tickerTimer = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.updateSyncLabel(); self?.updateBackdrop() }
+            Task { @MainActor in self?.tick() }
         }
 
         // Hourly session check
@@ -154,7 +195,15 @@ class WidgetWindowController: NSWindowController {
         tickerTimer?.invalidate()
         sessionCheckTimer?.invalidate()
         autoRefreshTimer?.invalidate()
+        // Cancel the pending debounce first: it would otherwise fire after this
+        // final write and race it.
+        saveDebounce?.cancel()
+        saveDebounce = nil
         savePosition()
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        queueSavePosition()
     }
 
     func toggleVisibility() {
@@ -170,22 +219,44 @@ class WidgetWindowController: NSWindowController {
         await fetchPortfolio()
     }
 
-    func bootstrap() async {
-        // Restore expanded state
-        viewModel.expanded = state.isExpanded
+    /// The two overlays and the actions their buttons perform. Both callbacks are
+    /// retained by the view model, which this controller owns, so they capture
+    /// `self` weakly to avoid a reference cycle.
+    private func promptToConnect() {
+        viewModel.showConnectOverlay { [weak self] in
+            self?.showSettings()
+        }
+    }
 
-        if await kiteService.apiKey.isEmpty {
-            viewModel.showConnectOverlay()
+    private func promptToSignIn(reason: String? = nil) {
+        viewModel.showLoginOverlay(reason: reason) { [weak self] in
+            Task { @MainActor in await self?.signIn() }
+        }
+    }
+
+    func bootstrap() async {
+        viewModel.activeTab = state.activeTab
+
+        // `apiKey` is private to the actor; `hasApiKey()` is the accessor.
+        guard await kiteService.hasApiKey() else {
+            promptToConnect()
             return
         }
 
-        if !(await kiteService.isAuthenticated()) {
-            viewModel.showLoginOverlay()
+        guard await kiteService.isAuthenticated() else {
+            promptToSignIn()
             return
         }
 
         await fetchPortfolio()
-        if state.isExpanded { toggleExpanded() }
+
+        // Restore the expanded pane by driving the same toggle the user would,
+        // so the window frame and the view model agree. Setting
+        // `viewModel.expanded` here as well would double-toggle and open a
+        // previously-expanded widget collapsed.
+        if state.isExpanded && !viewModel.expanded {
+            toggleExpanded()
+        }
     }
 
     func fetchPortfolio() async {
@@ -196,15 +267,17 @@ class WidgetWindowController: NSWindowController {
             let portfolio = try await kiteService.getPortfolio()
             viewModel.portfolio = portfolio
             viewModel.lastSync = Date()
-            viewModel.usingStaleNavs = kiteService.usingStaleFundNavs
+            viewModel.usingStaleNavs = await kiteService.usingStaleFundNavs
             viewModel.errorMessage = nil
             viewModel.hideOverlay()
-        } catch let error as KiteError where error.message.contains("expired") || error.message.contains("TokenException") {
-            viewModel.showLoginOverlay(reason: "Your session expired for the day. Sign in again.")
+        } catch let error as KiteError where error.isAuthFailure {
+            // Typed, not string-matched: the old `message.contains("expired")`
+            // broke the moment Kite reworded its error text.
+            promptToSignIn(reason: "Your session expired for the day. Sign in again.")
         } catch {
             viewModel.errorMessage = error.localizedDescription
             if viewModel.lastSync == nil {
-                viewModel.showConnectOverlay()
+                promptToConnect()
             }
         }
 
@@ -215,7 +288,7 @@ class WidgetWindowController: NSWindowController {
         guard viewModel.isMarketOpen else { return }
 
         if !(await kiteService.isAuthenticated()) {
-            viewModel.showLoginOverlay(reason: "Your session expired. Sign in again.")
+            promptToSignIn(reason: "Your session expired. Sign in again.")
         } else if viewModel.portfolio == nil && !viewModel.showOverlay {
             await fetchPortfolio()
         }
@@ -250,21 +323,37 @@ class WidgetWindowController: NSWindowController {
     }
 
     func showSettings() {
-        let settingsWindow = SettingsWindow(kiteService: kiteService) { [weak self] in
-            Task { @MainActor in
-                await self?.kiteService.reloadCredentials()
-                await self?.fetchPortfolio()
+        // Held for the window's lifetime. A local NSWindowController is
+        // deallocated at the end of this method, taking its window with it, so
+        // the settings pane would flash and vanish.
+        if settingsController == nil {
+            settingsController = SettingsWindowController(kiteService: kiteService) { [weak self] in
+                Task { @MainActor in
+                    guard let self else { return }
+                    await self.kiteService.reloadCredentials()
+                    await self.bootstrap()
+                }
             }
+            settingsController?.window?.isReleasedWhenClosed = false
         }
-        let controller = NSWindowController(window: settingsWindow)
-        controller.showWindow(nil)
+
+        settingsController?.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
     func signIn() async {
-        viewModel.overlayActionTitle = "Waiting for Kite..."
+        // A second tap while the first login is in flight would try to bind port
+        // 5173 again and fail with "port is busy" -- against ourselves. Windows
+        // disables the button (`OverlayButton.IsEnabled = false`); this is the
+        // same guard.
+        guard !viewModel.isSigningIn else { return }
+        viewModel.isSigningIn = true
+        defer { viewModel.isSigningIn = false }
+
+        viewModel.overlayActionTitle = "Waiting for Kite…"
         do {
-            let token = try await LoginServer().captureRequestToken(loginURL: kiteService.loginURL)
+            let url = await kiteService.loginURL
+            let token = try await LoginServer().captureRequestToken(loginURL: url)
             try await kiteService.authenticate(requestToken: token)
             viewModel.hideOverlay()
             await fetchPortfolio()
@@ -278,28 +367,73 @@ class WidgetWindowController: NSWindowController {
         window?.performDrag(with: event)
     }
 
-    private func updateSyncLabel() {
-        // viewModel.syncLabel is computed property
-        objectWillChange.send()
+    /// Pops the status-bar menu under the widget's `⋯` button. The menu is built
+    /// by the app delegate because every item targets a selector on it.
+    func showContextMenu() {
+        guard let delegate = NSApp.delegate as? AppDelegate,
+              let contentView = window?.contentView else { return }
+
+        let menu = delegate.buildStatusMenu()
+        // Just below the header's trailing edge, where the ⋯ button sits.
+        let origin = NSPoint(x: contentView.bounds.maxX - 28, y: contentView.bounds.maxY - 44)
+        menu.popUp(positioning: nil, at: origin, in: contentView)
     }
 
-    private func updateBackdrop() {
-        // Trigger backdrop refresh in view
-        objectWillChange.send()
+    /// The view observes `viewModel`, not this controller (an NSWindowController
+    /// is not an ObservableObject), so the old `objectWillChange.send()` here
+    /// redrew nothing and the "2m ago" label never advanced. Poking a published
+    /// property on the view model is what actually invalidates the view.
+    private func tick() {
+        viewModel.clockTick &+= 1
     }
 }
 
 class WidgetWindow: NSWindow {
     weak var controller: WidgetWindowController?
 
+    /// Parity with the Windows `OnKey` handler: Esc collapses, Space/Enter
+    /// toggles, R refreshes, Tab switches between stocks and funds.
+    override func keyDown(with event: NSEvent) {
+        guard let controller else {
+            super.keyDown(with: event)
+            return
+        }
+
+        // 53 = Escape, 49 = Space, 36 = Return, 48 = Tab.
+        switch event.keyCode {
+        case 53:
+            if controller.isExpanded { controller.toggleExpanded() } else { super.keyDown(with: event) }
+        case 49, 36:
+            controller.toggleExpanded()
+        case 48:
+            controller.switchTab(controller.activeTab == "stocks" ? "funds" : "stocks")
+        default:
+            if event.charactersIgnoringModifiers?.lowercased() == "r" {
+                Task { await controller.refreshNow() }
+            } else {
+                super.keyDown(with: event)
+            }
+        }
+    }
+
+    /// The drag strip along the top of the widget, in points. Everything below
+    /// it belongs to SwiftUI.
+    private let dragHandleHeight: CGFloat = 44
+
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 
     override func mouseDown(with event: NSEvent) {
-        // Allow drag from header area
-        let location = convert(event.locationInWindow, to: nil)
-        if let view = contentView?.hitTest(location), view is NSHostingView<WidgetView> {
-            controller?.handleDrag(event)
+        // The old test asked whether the hit view was the NSHostingView -- which
+        // is the entire window -- so every click anywhere, including on buttons
+        // and tabs, started a window drag. Only the header strip drags.
+        //
+        // locationInWindow is bottom-left origin, so the header is the *top*
+        // `dragHandleHeight` points of the frame.
+        let isInHeader = event.locationInWindow.y >= frame.height - dragHandleHeight
+
+        if isInHeader {
+            performDrag(with: event)
         } else {
             super.mouseDown(with: event)
         }

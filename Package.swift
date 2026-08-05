@@ -12,24 +12,38 @@ let package = Package(
     ],
     dependencies: [],
     targets: [
+        // The app's logic, split out so it can be linked into the test target.
+        // XCTest cannot import an executable target, so everything testable --
+        // P&L math, AMFI parsing, backdrop selection, name formatting -- lives
+        // here and the executable below is just the entry point.
+        .target(
+            name: "KiteGlanceCore",
+            dependencies: [],
+            path: "Sources/KiteGlanceCore"
+        ),
         .executableTarget(
             name: "KiteGlance",
-            dependencies: [],
+            dependencies: ["KiteGlanceCore"],
             path: "Sources/KiteGlance",
+            exclude: ["Info.plist", "Assets/Backdrops/README.md"],
             resources: [
-                .process("Assets/Backdrops"),
-                .process("Assets/Icons"),
-                .copy("Info.plist")
+                // `Assets/Icons` was also listed here but does not exist, which
+                // is a hard error in SwiftPM. Only declare real directories.
+                //
+                // The PNGs are generated (`swift run generate-assets`) and
+                // gitignored, so this directory is empty in a fresh clone --
+                // `.copy` tolerates that, and the app falls back to gradients.
+                .copy("Assets/Backdrops")
             ],
             swiftSettings: [
-                .unsafeFlags(["-O", "-whole-module-optimization"], .when(configuration: .release)),
                 .define("RELEASE", .when(configuration: .release))
             ],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("SwiftUI"),
                 .linkedFramework("Network"),
-                .linkedFramework("CryptoKit")
+                .linkedFramework("CryptoKit"),
+                .linkedFramework("Security")
             ]
         ),
         .executableTarget(
@@ -37,6 +51,11 @@ let package = Package(
             dependencies: [],
             path: "scripts",
             sources: ["generate-assets.swift"]
+        ),
+        .testTarget(
+            name: "KiteGlanceTests",
+            dependencies: ["KiteGlanceCore"],
+            path: "Tests/KiteGlanceTests"
         )
     ]
 )
