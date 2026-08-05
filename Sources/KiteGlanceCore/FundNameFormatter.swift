@@ -16,11 +16,15 @@ public struct FundNameFormatter {
 
     /// Ordered (pattern, replacement) pairs. The plan/option suffixes carry no
     /// information at a glance -- every holding has one -- so they are dropped.
+    /// The dashes are written as literal characters. In a raw string (`#"..."#`)
+    /// a `\u{2013}` escape is *not* processed by Swift, so the regex engine
+    /// received the eight literal characters `\u{2013}` and the character class
+    /// never matched an en-dash -- which is what CI caught.
     private static let substitutions: [(pattern: String, replacement: String)] = [
-        (#"\s*[-\u{2013}]?\s*(DIRECT|REGULAR)\s+PLAN\b"#, ""),
-        (#"\s*[-\u{2013}]?\s*(GROWTH|IDCW|DIVIDEND)(\s+OPTION)?\b"#, ""),
-        (#"\bFUND OF FUND\b"#, "FoF"),
-        (#"\s*[-\u{2013}]\s*$"#, ""),
+        (#"\s*[-–—]?\s*(DIRECT|REGULAR)\s+PLAN\b"#, ""),
+        (#"\s*[-–—]?\s*(GROWTH|IDCW|DIVIDEND)(\s+OPTION)?\b"#, ""),
+        (#"\bFUND\s+OF\s+FUNDS?\b"#, "FoF"),
+        (#"\s*[-–—]\s*$"#, ""),
         // Collapse to a single space, not to "" -- the latter welded words
         // together ("HDFC  Top 100" became "HDFCTop 100").
         (#"\s{2,}"#, " ")
@@ -42,7 +46,13 @@ public struct FundNameFormatter {
 
         return s.split(separator: " ").map { word -> String in
             let bare = word.trimmingCharacters(in: CharacterSet(charactersIn: "()-,"))
-            guard !bare.isEmpty else { return String(word) }
+            // A token that was nothing but punctuation (a stray trailing "-")
+            // drops out entirely rather than being re-emitted verbatim.
+            guard !bare.isEmpty else { return "" }
+
+            // "FoF" is substituted above with deliberate mixed case; the
+            // uppercase pass below would flatten it to "FOF".
+            if bare == "FoF" { return bare }
 
             if keepUpper.contains(bare.uppercased()) {
                 return bare.uppercased()
@@ -54,6 +64,8 @@ public struct FundNameFormatter {
                 return bare.uppercased()
             }
             return bare.prefix(1).uppercased() + bare.dropFirst().lowercased()
-        }.joined(separator: " ")
+        }
+        .filter { !$0.isEmpty }
+        .joined(separator: " ")
     }
 }
