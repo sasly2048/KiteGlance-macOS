@@ -70,6 +70,36 @@ final class NavParserTests: XCTestCase {
         XCTAssertTrue(NavParser.parse(text).isEmpty)
     }
 
+    /// Regression: fund names contain semicolons -- "... Fund; Growth Option"
+    /// -- and the split was capped at five, so the name's tail stayed glued to
+    /// the NAV and the date. Index 4 held " Growth Option" rather than a
+    /// number, the Decimal parse failed, and the fund was dropped from the map
+    /// entirely, silently falling back to Kite's stale settlement NAV.
+    ///
+    /// Every sample row above has a clean name, which is exactly why the whole
+    /// suite passed while this was broken.
+    func testParsesFundsWhoseNameContainsASemicolon() {
+        let text = """
+            Scheme Code;ISIN Div Payout/ISIN Growth;ISIN Div Reinvestment;Scheme Name;Net Asset Value;Date
+            119552;INF209KB1LZ2;INF209KB1MA3;HDFC Gold Fund of Fund; Growth Option;44.0707;07-Aug-2026
+            """
+        let navs = NavParser.parse(text)
+
+        XCTAssertEqual(navs["INF209KB1LZ2"], Decimal(string: "44.0707"),
+                       "a semicolon in the fund name displaced the NAV column")
+        XCTAssertEqual(navs["INF209KB1MA3"], Decimal(string: "44.0707"))
+    }
+
+    /// A five-field row has no NAV column: index 4 is the date. Admitting it
+    /// would parse a date fragment as money.
+    func testSkipsRowsWithTooFewFields() {
+        let text = """
+            Scheme Code;ISIN Div Payout/ISIN Growth;ISIN Div Reinvestment;Scheme Name;Net Asset Value;Date
+            100000;INF209K01AA1;;Truncated Scheme;05-Aug-2026
+            """
+        XCTAssertTrue(NavParser.parse(text).isEmpty)
+    }
+
     func testEmptyInputYieldsNoNavs() {
         XCTAssertTrue(NavParser.parse("").isEmpty)
     }

@@ -147,7 +147,12 @@ actor KiteService {
                 change = 0
             }
 
-            dayPnl += qty * change
+            // Day change applies to settled shares only. T1 stock was bought
+            // today and held no position at yesterday's close, so attributing a
+            // full day's move to it inflates the day figure and makes it disagree
+            // with the Kite app. Holdings *value* below still counts every share --
+            // you own them either way.
+            dayPnl += h.quantity * change
             equityCurrent += qty * lastPrice
 
             allHoldings.append(Holding(
