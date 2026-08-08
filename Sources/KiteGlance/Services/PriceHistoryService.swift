@@ -81,36 +81,36 @@ actor PriceHistoryService {
         try? data.write(to: fileURL, options: .atomic)
     }
 
-    /// Seeds a symbol from Kite's historical endpoint when the account has that
-    /// subscription. A 403 means it does not, which is the common case and is
-    /// recorded so it is not retried all session.
+    /// Whether this symbol still wants seeding from the historical endpoint.
     ///
-    /// `fetch` is injected rather than called directly so this stays testable
-    /// and so `KiteService` owns the HTTP.
-    func seedFromHistorical(
-        symbol: String,
-        fetch: () async throws -> [Double]
-    ) async {
+    /// Asked before the fetch so the caller can skip the network entirely for
+    /// rows the local accumulation has already filled, and for every row once
+    /// the account is known not to subscribe.
+    func needsHistoricalSeed(symbol: String) -> Bool {
+        loadIfNeeded()
+        return !historicalUnavailable && !history[symbol].isRenderable
+    }
+
+    /// Records that this account has no historical subscription, so the endpoint
+    /// is asked at most once per launch.
+    func markHistoricalUnavailable() {
+        historicalUnavailable = true
+    }
+
+    /// Seeds a symbol from closes already fetched by the caller.
+    ///
+    /// Takes `[Double]` rather than a fetching closure: a closure is not
+    /// `Sendable`, so under Swift 6 it cannot cross into this actor. The caller
+    /// owns the HTTP anyway, so handing over plain data is both simpler and the
+    /// only thing that compiles.
+    func seed(symbol: String, closes: [Double]) {
         loadIfNeeded()
 
-        guard !historicalUnavailable, !history[symbol].isRenderable else { return }
+        guard !closes.isEmpty, !history[symbol].isRenderable else { return }
 
-        do {
-            let closes = try await fetch()
-            guard !closes.isEmpty else { return }
-
-            var series = PriceSeries()
-            for close in closes { series.append(close) }
-            history.series[symbol] = series
-            persist()
-        } catch is CancellationError {
-            return
-        } catch let kiteError as KiteError where kiteError.isSubscriptionFailure {
-            // Not an error: this account simply does not pay for historical
-            // data. Fall back to accumulating live prices, silently.
-            historicalUnavailable = true
-        } catch {
-            logger.debug("historical seed for \(symbol, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
-        }
+        var series = PriceSeries()
+        for close in closes { series.append(close) }
+        history.series[symbol] = series
+        persist()
     }
 }

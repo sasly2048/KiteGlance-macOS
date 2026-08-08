@@ -373,10 +373,20 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
     /// Mutual funds are skipped: there is no historical instrument for a fund.
     private func seedHistoricalSeries(for holdings: [Holding]) async {
         for holding in holdings where !holding.isMutualFund {
-            guard let token = holding.instrumentToken else { continue }
+            guard let token = holding.instrumentToken,
+                  await priceHistory.needsHistoricalSeed(symbol: holding.symbol) else { continue }
 
-            await priceHistory.seedFromHistorical(symbol: holding.symbol) {
-                try await self.kiteService.historicalCloses(instrumentToken: String(token))
+            do {
+                let closes = try await kiteService.historicalCloses(instrumentToken: String(token))
+                await priceHistory.seed(symbol: holding.symbol, closes: closes)
+            } catch let error as KiteError where error.isSubscriptionFailure {
+                // This account does not pay for historical data. Normal, and the
+                // reason the local accumulation exists -- stop asking.
+                await priceHistory.markHistoricalUnavailable()
+                return
+            } catch {
+                // One symbol failing is not worth abandoning the rest.
+                continue
             }
         }
     }
