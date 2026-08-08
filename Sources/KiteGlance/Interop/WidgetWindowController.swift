@@ -16,7 +16,7 @@ extension NSWindow.Level {
 
 class WidgetWindowController: NSWindowController, NSWindowDelegate {
     private let logger = Logger(subsystem: "com.kiteglance", category: "WidgetWindow")
-    private var hostingView: NSHostingView<WidgetView>?
+    private var hostingView: NSHostingView<ThemedContainer<WidgetView>>?
     private var viewModel: PortfolioViewModel
     var state = WidgetState.load()
     private var kiteService = KiteService()
