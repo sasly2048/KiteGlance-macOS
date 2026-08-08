@@ -38,10 +38,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // A leftover API dump from a previous debug session must not outlive it.
         ApiDump.purgeIfDisabled()
 
-        setupStatusItem()
         createWidgetWindow()
+        setupStatusItem()
         widgetController?.showWindow(nil)
-        Task { await widgetController?.bootstrap() }
+        Task {
+            await widgetController?.bootstrap()
+            // The account list is only meaningful after bootstrap has resolved
+            // it, so the menu is rebuilt once it has.
+            await refreshActiveAccount()
+            statusItem?.menu = buildStatusMenu()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -90,6 +96,39 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         backdropItem.submenu = backdropMenu
         menu.addItem(backdropItem)
 
+        // Account switcher. Only shown once more than one account is known --
+        // a submenu with a single entry is noise.
+        let accounts = widgetController?.accounts ?? []
+        if accounts.count > 1 {
+            let accountMenu = NSMenu()
+            for account in accounts {
+                let item = NSMenuItem(
+                    title: account.label,
+                    action: #selector(switchAccount(_:)),
+                    keyEquivalent: ""
+                )
+                // The id travels on the item, so the selector does not have to
+                // map a title back to an account.
+                item.representedObject = account.id
+                item.state = account.id == activeAccountId ? .on : .off
+                accountMenu.addItem(item)
+            }
+            let accountItem = NSMenuItem(title: "Account", action: nil, keyEquivalent: "")
+            accountItem.submenu = accountMenu
+            menu.addItem(accountItem)
+        }
+
+        let themeMenu = NSMenu()
+        for mode in ThemeMode.allCases {
+            let item = NSMenuItem(title: mode.rawValue, action: #selector(setTheme(_:)), keyEquivalent: "")
+            item.representedObject = mode.rawValue
+            item.state = mode == widgetController?.state.themeMode ? .on : .off
+            themeMenu.addItem(item)
+        }
+        let themeItem = NSMenuItem(title: "Appearance", action: nil, keyEquivalent: "")
+        themeItem.submenu = themeMenu
+        menu.addItem(themeItem)
+
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ","))
         menu.addItem(NSMenuItem.separator())
@@ -102,7 +141,37 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             item.target = self
         }
 
+        // NSMenu renders outside the SwiftUI view tree, so `@Environment(\.palette)`
+        // never reaches it. Setting the appearance directly is what themes it.
+        if let controller = widgetController {
+            let resolved = ResolvedTheme.resolve(
+                mode: controller.state.themeMode,
+                systemIsDark: NSApp.effectiveAppearance.isDark
+            )
+            menu.appearance = NSAppearance(named: Palette.of(resolved).appearance)
+        }
+
         return menu
+    }
+
+    /// Tracks the resolved active account so the menu can tick it. Refreshed
+    /// when the menu is built.
+    private var activeAccountId: String?
+
+    func refreshActiveAccount() async {
+        activeAccountId = await widgetController?.activeAccountId
+    }
+
+    /// Rebuilds the status-bar menu so its tick marks and appearance match the
+    /// current theme and active account.
+    ///
+    /// Assigning a fresh menu is what actually updates it: `refreshActiveAccount`
+    /// only sets the variable that `buildStatusMenu` reads.
+    func refreshStatusMenu() {
+        Task { @MainActor in
+            await refreshActiveAccount()
+            statusItem?.menu = buildStatusMenu()
+        }
     }
 
     private func createWidgetWindow() {
@@ -132,6 +201,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func setBackdropRotate() { widgetController?.setBackdropMode(.rotate) }
     @objc private func setBackdropStatic() { widgetController?.setBackdropMode(.static) }
     @objc private func chooseCustomBackdrop() { widgetController?.chooseCustomBackdrop() }
+
+    @objc private func switchAccount(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        // switchToAccount resolves asynchronously and rebuilds this menu when it
+        // lands -- reticking here would use the pre-switch answer.
+        widgetController?.switchToAccount(id)
+    }
+
+    @objc private func setTheme(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let mode = ThemeMode(rawValue: raw) else { return }
+        // setThemeMode rebuilds the status menu itself, so the tick moves and
+        // the menu repaints in the new appearance.
+        widgetController?.setThemeMode(mode)
+    }
 
     @objc private func openSettings() {
         widgetController?.showSettings()

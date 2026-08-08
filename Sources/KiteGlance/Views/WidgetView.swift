@@ -20,6 +20,8 @@ struct WidgetView: View {
     /// the rows animate in rather than appearing all at once.
     @State private var rowsVisible = false
 
+    @Environment(\.palette) private var palette
+
     private let compactHeight: CGFloat = 256
     private let rowHeight: CGFloat = 58
     private let paneChrome: CGFloat = 76
@@ -116,6 +118,14 @@ struct WidgetView: View {
         Color.black
             .opacity(scrimOpacity * 0.35)
             .allowsHitTesting(false)
+
+        // The eight backdrops are dark-tuned raster art. Light mode washes them
+        // toward white instead of commissioning a second set of eight -- the
+        // shapes still read through, and the labels above get the bright ground
+        // they need.
+        palette.backdropTint
+            .opacity(palette.backdropTintOpacity)
+            .allowsHitTesting(false)
     }
 
     /// `.custom` is a `BackdropMode`, not a `BackdropImage` -- the old
@@ -149,7 +159,7 @@ struct WidgetView: View {
             Image(nsImage: grain)
                 .resizable(resizingMode: .tile)
                 .frame(width: 372, height: viewModel.expanded ? compactHeight + paneHeight : compactHeight)
-                .opacity(0.028)
+                .opacity(palette.grainOpacity)
                 .blendMode(.overlay)
         }
     }
@@ -167,7 +177,7 @@ struct WidgetView: View {
         // The `let` above the gradient made this a multi-statement body with no
         // `return`, so it inferred nothing and failed to compile.
         RadialGradient(
-            gradient: Gradient(colors: [viewModel.heroColor.opacity(0.18), .clear]),
+            gradient: Gradient(colors: [viewModel.heroColor(palette).opacity(0.18), .clear]),
             center: .topLeading,
             startRadius: 0,
             endRadius: 400
@@ -184,7 +194,7 @@ struct WidgetView: View {
         HStack {
             Text("Portfolio")
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Color(white: 1, opacity: 0.55))
+                .foregroundStyle(palette.secondary)
 
             // Live indicator
             ZStack {
@@ -202,22 +212,29 @@ struct WidgetView: View {
             }
             .frame(width: 10, height: 10)
             .padding(.leading, 10)
+            // The pulse conveys "market open" purely through animation, which
+            // VoiceOver cannot perceive. This is the same fact as text.
+            .accessibilityElement()
+            .accessibilityLabel(viewModel.marketStatusDescription)
 
             Text(viewModel.syncLabel)
                 .font(.system(size: 11))
-                .foregroundStyle(Color(white: 1, opacity: 0.3))
+                .foregroundStyle(palette.tertiary)
+                .accessibilityLabel("Last updated")
+                .accessibilityValue(viewModel.syncLabel)
 
             Spacer()
 
             Button(action: { showMenu() }) {
                 Image(systemName: "ellipsis")
                     .font(.system(size: 16, weight: .medium))
-                    .foregroundStyle(Color(white: 1, opacity: 0.3))
+                    .foregroundStyle(palette.tertiary)
                     .frame(width: 28, height: 28)
-                    .background(Color(white: 1, opacity: 0.05))
+                    .background(palette.surface)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Widget menu")
             .onHover { inside in
                 // hover effect
             }
@@ -236,17 +253,20 @@ struct WidgetView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(viewModel.heroLabel)
                     .font(.system(size: 11.5, weight: .medium))
-                    .foregroundStyle(Color(white: 1, opacity: 0.3))
+                    .foregroundStyle(palette.tertiary)
 
                 // 720ms on the hero, 640ms elsewhere, matching the Windows
                 // Numeral tween durations.
                 Text(Money.rupees(viewModel.heroValue))
                     .font(.system(size: 40, weight: .semibold, design: .rounded))
-                    .foregroundStyle(viewModel.heroColor)
+                    .foregroundStyle(viewModel.heroColor(palette))
                     .contentTransition(.numericText())
                     .monospacedDigit()
                     .animation(.easeOut(duration: 0.72), value: viewModel.heroValue)
             }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(viewModel.heroLabel)
+            .accessibilityValue(viewModel.heroAccessibilityValue)
 
             Spacer()
 
@@ -263,12 +283,15 @@ struct WidgetView: View {
                     .contentTransition(.numericText())
                     .animation(.easeOut(duration: 0.72), value: viewModel.heroPct)
             }
-            .foregroundStyle(Color(white: 1, opacity: 0.3))
+            .foregroundStyle(palette.tertiary)
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
-            .background(viewModel.heroColor.opacity(0.12))
+            .background(viewModel.heroColor(palette).opacity(0.12))
             .clipShape(RoundedRectangle(cornerRadius: 7))
             .padding(.bottom, 8)
+            // The hero value already announces this percentage; repeating it
+            // makes VoiceOver read the same number twice.
+            .accessibilityHidden(true)
         }
     }
 
@@ -279,18 +302,18 @@ struct WidgetView: View {
             HStack {
                 Text(Money.rupees(viewModel.invested))
                     .font(.system(size: 12))
-                    .foregroundStyle(Color(white: 1, opacity: 0.3))
+                    .foregroundStyle(palette.tertiary)
                     .monospacedDigit()
                     .contentTransition(.numericText())
                     .animation(.easeOut(duration: 0.64), value: viewModel.invested)
 
                 Image(systemName: "arrow.right")
                     .font(.system(size: 9, weight: .medium))
-                    .foregroundStyle(Color(white: 1, opacity: 0.18))
+                    .foregroundStyle(palette.faint)
 
                 Text(Money.rupees(viewModel.currentValue))
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Color.white)
+                    .foregroundStyle(palette.primary)
                     .monospacedDigit()
                     .contentTransition(.numericText())
                     .animation(.easeOut(duration: 0.64), value: viewModel.currentValue)
@@ -301,7 +324,7 @@ struct WidgetView: View {
                     ? "\(viewModel.funds.count) fund\(viewModel.funds.count == 1 ? "" : "s")"
                     : Money.signed(viewModel.overallPnl))
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(viewModel.activeTab == "funds" ? Color(white: 1, opacity: 0.3) : (viewModel.overallPnl >= 0 ? Color.green : Color.red))
+                    .foregroundStyle(viewModel.activeTab == "funds" ? palette.tertiary : (viewModel.overallPnl >= 0 ? palette.positive : palette.negative))
                     .monospacedDigit()
                     .contentTransition(.numericText())
                     // Keyed on the tab too, so switching tabs cuts rather than
@@ -311,6 +334,9 @@ struct WidgetView: View {
                     .animation(.easeOut(duration: 0.64), value: viewModel.overallPnl)
                     .animation(nil, value: viewModel.activeTab)
             }
+
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Invested versus current value")
 
             // Track bar
             GeometryReader { geo in
@@ -322,7 +348,7 @@ struct WidgetView: View {
                 ZStack(alignment: .leading) {
                     // Track background
                     RoundedRectangle(cornerRadius: 2)
-                        .fill(Color(white: 1, opacity: 0.07))
+                        .fill(palette.surfaceHover)
                         .frame(height: 4)
 
                     // Delta fill
@@ -333,7 +359,7 @@ struct WidgetView: View {
                         let isUp = ret >= 0
 
                         RoundedRectangle(cornerRadius: 2)
-                            .fill(isUp ? Color.green : Color.red)
+                            .fill(isUp ? palette.positive : palette.negative)
                             .frame(width: max(half, 2), height: 4)
                             .offset(x: isUp ? center : center - half)
                             .animation(.spring(response: 0.8, dampingFraction: 0.8), value: viewModel.currentValue)
@@ -341,12 +367,13 @@ struct WidgetView: View {
 
                     // Center notch
                     RoundedRectangle(cornerRadius: 1)
-                        .fill(Color(white: 1, opacity: 0.3))
+                        .fill(palette.tertiary)
                         .frame(width: 1.5, height: 10)
                         .offset(x: center - 0.75)
                 }
             }
             .frame(height: 10)
+            .accessibilityHidden(true)
         }
     }
 
@@ -357,26 +384,29 @@ struct WidgetView: View {
             HStack {
                 Text(viewModel.expanded ? "Hide" : "Holdings")
                     .font(.system(size: 11.5, weight: .medium))
-                    .foregroundStyle(Color(white: 1, opacity: 0.55))
+                    .foregroundStyle(palette.secondary)
 
                 Spacer()
 
                 Image(systemName: "chevron.down")
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(Color(white: 1, opacity: 0.3))
+                    .foregroundStyle(palette.tertiary)
                     .rotationEffect(.degrees(viewModel.expanded ? 180 : 0))
                     .animation(.spring(response: 0.54, dampingFraction: 0.8), value: viewModel.expanded)
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 13)
-            .background(Color(white: 1, opacity: 0.05))
+            .background(palette.surface)
             .overlay(alignment: .top) {
                 Rectangle()
-                    .fill(Color(white: 1, opacity: 0.08))
+                    .fill(palette.hairline)
                     .frame(height: 1)
             }
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("Holdings")
+        .accessibilityValue(viewModel.expanded ? "Expanded" : "Collapsed")
+        .accessibilityHint(viewModel.expanded ? "Double-tap to hide holdings" : "Double-tap to show holdings")
     }
 
     // MARK: - Holdings Pane
@@ -397,7 +427,10 @@ struct WidgetView: View {
                         // this with a per-row animation delay; no walking of item
                         // containers needed.
                         ForEach(Array(viewModel.holdingsViewModels.enumerated()), id: \.element.id) { index, holding in
-                            HoldingRow(viewModel: holding)
+                            HoldingRow(
+                                viewModel: holding,
+                                series: viewModel.priceHistory[holding.rawSymbol]
+                            )
                                 .opacity(rowsVisible ? 1 : 0)
                                 .offset(y: rowsVisible ? 0 : 10)
                                 .animation(
@@ -439,7 +472,7 @@ struct WidgetView: View {
                 let tab = viewModel.activeTab == "stocks" ? 0 : 1
                 let x = tab == 0 ? 0 : geo.size.width / 2 - 22 // approximate
                 Rectangle()
-                    .fill(Color.white)
+                    .fill(palette.primary)
                     .frame(width: 44, height: 2)
                     .offset(x: x)
                     .animation(.spring(response: 0.48, dampingFraction: 0.8), value: viewModel.activeTab)
@@ -456,23 +489,26 @@ struct WidgetView: View {
                 if count > 0 {
                     Text("\(count)")
                         .font(.system(size: 11.5, weight: .semibold))
-                        .foregroundStyle(Color(white: 1, opacity: 0.18))
+                        .foregroundStyle(palette.faint)
                 }
             }
-            .foregroundStyle(viewModel.activeTab == tab ? Color.white : Color(white: 1, opacity: 0.3))
+            .foregroundStyle(viewModel.activeTab == tab ? palette.primary : palette.tertiary)
             .padding(.vertical, 10)
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityValue(count > 0 ? "\(count) held" : "None held")
+        .accessibilityAddTraits(viewModel.activeTab == tab ? [.isSelected, .isButton] : .isButton)
     }
 
     private var emptyState: some View {
         VStack(spacing: 6) {
             Text(viewModel.activeTab == "funds" ? "No funds held" : "No stocks held")
                 .font(.system(size: 12.5))
-                .foregroundStyle(Color(white: 1, opacity: 0.3))
+                .foregroundStyle(palette.tertiary)
             Text(viewModel.activeTab == "funds" ? "Coin holdings will appear here" : "Equity holdings will appear here")
                 .font(.system(size: 11))
-                .foregroundStyle(Color(white: 1, opacity: 0.18))
+                .foregroundStyle(palette.faint)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 60)
@@ -482,17 +518,17 @@ struct WidgetView: View {
 
     private var overlayView: some View {
         ZStack {
-            Color(white: 0.07, opacity: 0.95)
+            palette.overlayScrim
                 .ignoresSafeArea()
 
             VStack(spacing: 20) {
                 Text(viewModel.overlayTitle)
                     .font(.system(size: 19, weight: .semibold, design: .rounded))
-                    .foregroundStyle(Color.white)
+                    .foregroundStyle(palette.primary)
 
                 Text(viewModel.overlayBody)
                     .font(.system(size: 12))
-                    .foregroundStyle(Color(white: 1, opacity: 0.55))
+                    .foregroundStyle(palette.secondary)
                     .multilineTextAlignment(.center)
                     .lineSpacing(3)
                     .padding(.horizontal, 30)
@@ -500,7 +536,7 @@ struct WidgetView: View {
                 Button(action: { viewModel.overlayAction?() }) {
                     Text(viewModel.overlayActionTitle)
                         .font(.system(size: 12.5, weight: .semibold))
-                        .foregroundStyle(Color.white)
+                        .foregroundStyle(palette.primary)
                         .padding(.horizontal, 20)
                         .padding(.vertical, 11)
                         .background(
@@ -524,13 +560,13 @@ struct WidgetView: View {
             Spacer()
             Text(message)
                 .font(.system(size: 11.5))
-                .foregroundStyle(Color.white)
+                .foregroundStyle(palette.primary)
                 .padding(.horizontal, 13)
                 .padding(.vertical, 8)
-                .background(Color(white: 0.14, opacity: 0.95))
+                .background(palette.toastBackground)
                 .overlay(
                     RoundedRectangle(cornerRadius: 9)
-                        .stroke(Color(white: 1, opacity: 0.08), lineWidth: 1)
+                        .stroke(palette.hairline, lineWidth: 1)
                 )
                 .clipShape(RoundedRectangle(cornerRadius: 9))
                 .shadow(radius: 8)
@@ -585,7 +621,7 @@ struct WidgetView: View {
             startBreathing()
             liveDotColor = .blue
         } else {
-            liveDotColor = Color(white: 1, opacity: 0.18)
+            liveDotColor = palette.faint
         }
 
         // Show skeleton initially

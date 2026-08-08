@@ -16,10 +16,11 @@ extension NSWindow.Level {
 
 class WidgetWindowController: NSWindowController, NSWindowDelegate {
     private let logger = Logger(subsystem: "com.kiteglance", category: "WidgetWindow")
-    private var hostingView: NSHostingView<WidgetView>?
+    private var hostingView: NSHostingView<ThemedContainer<WidgetView>>?
     private var viewModel: PortfolioViewModel
     var state = WidgetState.load()
     private var kiteService = KiteService()
+    private let priceHistory = PriceHistoryService()
     private var autoRefreshTimer: Timer?
     private var sessionCheckTimer: Timer?
     private var tickerTimer: Timer?
@@ -54,6 +55,7 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
         setupView()
         restorePosition()
         applyPinMode()
+        applyAppearance()
         startTimers()
     }
 
@@ -68,7 +70,9 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
 
     private func setupView() {
         let widgetView = WidgetView(viewModel: viewModel, controller: self)
-        hostingView = NSHostingView(rootView: widgetView)
+        hostingView = NSHostingView(
+            rootView: ThemedContainer(mode: state.themeMode) { widgetView }
+        )
         hostingView?.frame = window?.contentView?.bounds ?? .zero
         hostingView?.autoresizingMask = [.width, .height]
         window?.contentView = hostingView
@@ -181,14 +185,68 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
             Task { @MainActor in await self?.checkSession() }
         }
 
-        // Auto-refresh every 5 minutes during market hours
-        autoRefreshTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
+        rebuildAutoRefreshTimer()
+    }
+
+    /// (Re)schedules auto-refresh for the configured interval.
+    ///
+    /// Called whenever the setting changes so a new interval takes effect
+    /// immediately -- a preference that needs a restart to apply reads as a bug.
+    /// The interval is read through `effectiveRefreshIntervalMinutes`, which
+    /// clamps it, so no stored value can schedule a runaway timer.
+    func rebuildAutoRefreshTimer() {
+        autoRefreshTimer?.invalidate()
+        autoRefreshTimer = nil
+
+        guard let minutes = state.effectiveRefreshIntervalMinutes else { return }
+
+        autoRefreshTimer = Timer.scheduledTimer(
+            withTimeInterval: TimeInterval(minutes) * 60,
+            repeats: true
+        ) { [weak self] _ in
             Task { @MainActor in
+                // Still gated on market hours: refreshing every five minutes
+                // through a closed weekend spends API quota to fetch the same
+                // numbers.
                 if self?.viewModel.isMarketOpen == true && self?.viewModel.showOverlay != true {
                     await self?.refreshNow()
                 }
             }
         }
+    }
+
+    func setRefreshInterval(_ minutes: Int) {
+        state.refreshIntervalMinutes = minutes
+        state.save()
+        rebuildAutoRefreshTimer()
+    }
+
+    /// Applies a theme to both worlds: the SwiftUI hierarchy via the palette
+    /// environment, and the window itself via `NSAppearance`, which is what
+    /// draws the shadow, the titlebar and the menus.
+    func setThemeMode(_ mode: ThemeMode) {
+        state.themeMode = mode
+        state.save()
+        applyAppearance()
+        setupView()
+        // The status menu is built by the app delegate and carries its own
+        // appearance and tick marks, neither of which the SwiftUI environment
+        // reaches -- without this it stays in the old theme until something
+        // else happens to rebuild it.
+        rebuildStatusMenu()
+    }
+
+    /// Asks the app delegate to rebuild the status-bar menu.
+    private func rebuildStatusMenu() {
+        (NSApp.delegate as? AppDelegate)?.refreshStatusMenu()
+    }
+
+    func applyAppearance() {
+        let resolved = ResolvedTheme.resolve(
+            mode: state.themeMode,
+            systemIsDark: NSApp.effectiveAppearance.isDark
+        )
+        window?.appearance = NSAppearance(named: Palette.of(resolved).appearance)
     }
 
     func shutdown() {
@@ -237,6 +295,18 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
     func bootstrap() async {
         viewModel.activeTab = state.activeTab
 
+        // Point the service at whichever remembered account actually has
+        // credentials. `nil` here means every listed account is a bare label,
+        // so the only honest outcome is the connect overlay -- signing in with
+        // an empty api_key is what produced Kite's error page on Windows.
+        if !state.accounts.isEmpty {
+            guard let accountId = await resolvedAccountId() else {
+                promptToConnect()
+                return
+            }
+            await kiteService.useAccount(accountId)
+        }
+
         // `apiKey` is private to the actor; `hasApiKey()` is the accessor.
         guard await kiteService.hasApiKey() else {
             promptToConnect()
@@ -267,6 +337,16 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
             let portfolio = try await kiteService.getPortfolio()
             viewModel.portfolio = portfolio
             viewModel.lastSync = Date()
+
+            // Every refresh contributes one point per holding; PriceSeries
+            // decides whether a given price is worth keeping.
+            await priceHistory.record(
+                portfolio.holdings
+                    .filter { !$0.awaitingPrice }
+                    .map { (symbol: $0.symbol, price: $0.lastPrice) }
+            )
+            await seedHistoricalSeries(for: portfolio.holdings)
+            viewModel.priceHistory = await priceHistory.allSeries()
             viewModel.usingStaleNavs = await kiteService.usingStaleFundNavs
             viewModel.errorMessage = nil
             viewModel.hideOverlay()
@@ -282,6 +362,33 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
         }
 
         viewModel.isLoading = false
+    }
+
+    /// Fills each equity row's series from Kite's historical endpoint, for
+    /// accounts that subscribe to it.
+    ///
+    /// Only for rows the local accumulation has not already filled, and the
+    /// service stops asking after the first `PermissionException` -- most
+    /// accounts do not pay for this, and that is a normal answer, not an error.
+    /// Mutual funds are skipped: there is no historical instrument for a fund.
+    private func seedHistoricalSeries(for holdings: [Holding]) async {
+        for holding in holdings where !holding.isMutualFund {
+            guard let token = holding.instrumentToken,
+                  await priceHistory.needsHistoricalSeed(symbol: holding.symbol) else { continue }
+
+            do {
+                let closes = try await kiteService.historicalCloses(instrumentToken: String(token))
+                await priceHistory.seed(symbol: holding.symbol, closes: closes)
+            } catch let error as KiteError where error.isSubscriptionFailure {
+                // This account does not pay for historical data. Normal, and the
+                // reason the local accumulation exists -- stop asking.
+                await priceHistory.markHistoricalUnavailable()
+                return
+            } catch {
+                // One symbol failing is not worth abandoning the rest.
+                continue
+            }
+        }
     }
 
     func checkSession() async {
@@ -327,18 +434,101 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
         // deallocated at the end of this method, taking its window with it, so
         // the settings pane would flash and vanish.
         if settingsController == nil {
-            settingsController = SettingsWindowController(kiteService: kiteService) { [weak self] in
-                Task { @MainActor in
-                    guard let self else { return }
-                    await self.kiteService.reloadCredentials()
-                    await self.bootstrap()
+            settingsController = SettingsWindowController(
+                kiteService: kiteService,
+                refreshIntervalMinutes: state.refreshIntervalMinutes,
+                themeMode: state.themeMode,
+                onPreferencesChange: { [weak self] minutes, theme in
+                    Task { @MainActor in
+                        guard let self else { return }
+                        self.setRefreshInterval(minutes)
+                        self.setThemeMode(theme)
+                    }
+                },
+                onSave: { [weak self] in
+                    Task { @MainActor in
+                        guard let self else { return }
+                        await self.kiteService.reloadCredentials()
+                        await self.rememberSignedInAccount()
+                        await self.bootstrap()
+                    }
                 }
-            }
+            )
             settingsController?.window?.isReleasedWhenClosed = false
         }
 
         settingsController?.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    // MARK: - Accounts
+
+    /// The accounts to show in the menu, and which one is ticked.
+    var accounts: [AccountRef] { state.accounts }
+
+    var activeAccountId: String? {
+        get async { await resolvedAccountId() }
+    }
+
+    /// The active account, resolved against the vault.
+    ///
+    /// Every read of the active account goes through here rather than reading
+    /// `state.activeAccountId` directly. A listed account is a label; only the
+    /// Keychain can say whether it has credentials, and `nil` means "none
+    /// usable" -- which must lead to the connect overlay, never to silently
+    /// using the first listed account with an empty key.
+    private func resolvedAccountId() async -> String? {
+        var usable: Set<String> = []
+        for account in state.accounts
+        where await CredentialVault(accountId: account.id).hasStoredCredentials() {
+            usable.insert(account.id)
+        }
+
+        return state.resolvedAccountId { usable.contains($0) }
+    }
+
+    /// Records the Kite user id after a successful sign-in, so the account can
+    /// be labelled in the menu.
+    ///
+    /// Ordering matters: this runs only once credentials are stored, and even
+    /// then the menu still resolves through the probe. The label is a
+    /// convenience, never evidence.
+    func rememberSignedInAccount() async {
+        guard let profile = try? await kiteService.currentProfile(),
+              let userId = profile.user_id, !userId.isEmpty else { return }
+
+        let label = profile.user_name.flatMap { $0.isEmpty ? nil : $0 } ?? userId
+
+        if let index = state.accounts.firstIndex(where: { $0.id == userId }) {
+            state.accounts[index].label = label
+        } else {
+            state.accounts.append(AccountRef(id: userId, label: label))
+        }
+        state.activeAccountId = userId
+        state.save()
+    }
+
+    func switchToAccount(_ id: String) {
+        state.activeAccountId = id
+        state.save()
+
+        Task { @MainActor in
+            // Re-resolve rather than trusting the id just written: if this
+            // account has no stored credentials the right outcome is the connect
+            // overlay, not a login URL with an empty api_key.
+            guard let resolved = await resolvedAccountId() else {
+                viewModel.portfolio = nil
+                promptToConnect()
+                rebuildStatusMenu()
+                return
+            }
+
+            await kiteService.useAccount(resolved)
+            viewModel.portfolio = nil
+            await bootstrap()
+            // Move the tick to the account that is actually active now.
+            rebuildStatusMenu()
+        }
     }
 
     func signIn() async {
@@ -355,6 +545,7 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
             let url = await kiteService.loginURL
             let token = try await LoginServer().captureRequestToken(loginURL: url)
             try await kiteService.authenticate(requestToken: token)
+            await rememberSignedInAccount()
             viewModel.hideOverlay()
             await fetchPortfolio()
         } catch {

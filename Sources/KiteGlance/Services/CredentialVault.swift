@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import KiteGlanceCore
 
 /// Credentials at rest, in the macOS Keychain.
 ///
@@ -22,11 +23,45 @@ struct Credentials: Codable, Sendable {
 
 actor CredentialVault {
     private let service: String
-    private let credentialsAccount = "credentials"
-    private let accessTokenAccount = "access-token"
 
-    init(service: String = "com.kiteglance.vault") {
+    /// Which account's items this vault reads and writes.
+    ///
+    /// Keychain items are suffixed per account (`credentials@AB1234`) so two
+    /// Kite logins never overwrite each other's key, secret or token. The
+    /// unsuffixed names are kept for `nil`, which is both the single-account
+    /// case and every item written by a build that predates this -- so an
+    /// existing user's credentials are still found after upgrading rather than
+    /// silently appearing to have been forgotten.
+    private let accountId: String?
+
+    private var credentialsAccount: String { suffixed("credentials") }
+    private var accessTokenAccount: String { suffixed("access-token") }
+
+    private func suffixed(_ base: String) -> String {
+        KeychainNaming.itemName(base: base, accountId: accountId)
+    }
+
+    init(service: String = "com.kiteglance.vault", accountId: String? = nil) {
         self.service = service
+        self.accountId = accountId
+    }
+
+    /// Whether this account has a usable API key and secret stored.
+    ///
+    /// This is the probe behind `WidgetState.resolvedAccountId`. It deliberately
+    /// asks the Keychain rather than trusting the remembered account list: a
+    /// listed account is a label, and a label is not a credential.
+    ///
+    /// It also ignores `KITE_API_KEY` / `KITE_API_SECRET`, which `load()`
+    /// honours. Those are global to the process, so letting them answer for a
+    /// specific account id would report every listed account as credentialled --
+    /// which is the exact failure this probe exists to prevent.
+    func hasStoredCredentials() -> Bool {
+        guard let data = readData(account: credentialsAccount),
+              let creds = try? JSONDecoder().decode(Credentials.self, from: data) else {
+            return false
+        }
+        return !creds.apiKey.isEmpty && !creds.apiSecret.isEmpty
     }
 
     // MARK: - Credentials
