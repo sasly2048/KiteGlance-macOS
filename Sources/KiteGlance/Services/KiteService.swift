@@ -125,49 +125,6 @@ actor KiteService {
             logger.warning("MF holdings fetch failed (\(error.localizedDescription, privacy: .public)); showing equity only")
         }
 
-        var allHoldings: [Holding] = []
-        var dayPnl: Decimal = 0
-        var equityCurrent: Decimal = 0
-
-        for h in equity {
-            let qty = h.quantity + (h.t1_quantity ?? 0)
-            guard qty > 0 else { continue }
-
-            let (lastPrice, awaiting) = priced(h.last_price, h.average_price)
-
-            // The `close > 0` guard matters: an unpriced or newly listed holding
-            // reports close_price 0, and `last - 0` would book the entire
-            // position as today's gain, poisoning the portfolio day total.
-            let change: Decimal
-            if let dayChange = h.day_change {
-                change = dayChange
-            } else if let close = h.close_price, close > 0 {
-                change = h.last_price - close
-            } else {
-                change = 0
-            }
-
-            // Day change applies to settled shares only. T1 stock was bought
-            // today and held no position at yesterday's close, so attributing a
-            // full day's move to it inflates the day figure and makes it disagree
-            // with the Kite app. Holdings *value* below still counts every share --
-            // you own them either way.
-            dayPnl += h.quantity * change
-            equityCurrent += qty * lastPrice
-
-            allHoldings.append(Holding(
-                symbol: h.tradingsymbol.trimmingCharacters(in: .whitespaces).isEmpty
-                    ? "Unnamed holding"
-                    : h.tradingsymbol,
-                qty: qty,
-                avgPrice: h.average_price,
-                lastPrice: lastPrice,
-                isMutualFund: false,
-                awaitingPrice: awaiting,
-                apiPnl: h.pnl
-            ))
-        }
-
         // Kite's /mf/holdings last_price is a stale settlement NAV -- verified
         // 1-3 percent away from the live NAV Coin itself displays. AMFI is the
         // official source both derive from, keyed by ISIN, which is exactly what
@@ -180,51 +137,46 @@ actor KiteService {
         let amfiWasLive = await amfiNav.hasLiveData
         usingStaleFundNavs = !funds.isEmpty && !amfiWasLive
 
-        for f in funds {
-            guard f.quantity > 0 else { continue }
-
-            var nav = f.last_price
-            var apiPnl: Decimal? = f.pnl
-
-            if let liveNavs,
-               let symbol = f.tradingsymbol?.trimmingCharacters(in: .whitespaces),
-               !symbol.isEmpty,
-               let amfi = liveNavs[symbol],
-               amfi > 0 {
-                nav = amfi
-                apiPnl = nil   // stale-NAV pnl cannot annotate a live NAV
-            }
-
-            let (lastPrice, awaiting) = priced(nav, f.average_price)
-
-            allHoldings.append(Holding(
-                symbol: f.fundName.trimmingCharacters(in: .whitespaces).isEmpty
-                    ? "Awaiting allotment"
-                    : f.fundName,
-                qty: f.quantity,
-                avgPrice: f.average_price,
-                lastPrice: lastPrice,
-                isMutualFund: true,
-                awaitingPrice: awaiting,
-                apiPnl: apiPnl
-            ))
-        }
-
-        let prevClose = equityCurrent - dayPnl
-
-        return PortfolioData(
-            dayPnl: dayPnl,
-            dayPnlPct: prevClose > 0 ? dayPnl / prevClose * 100 : 0,
-            holdings: allHoldings
-        )
+        // The arithmetic itself lives in KiteGlanceCore, where it can be unit
+        // tested against literal holdings instead of a live HTTP call.
+        return PortfolioAssembler.assemble(equity: equity, funds: funds, liveNavs: liveNavs)
     }
 
-    /// A holding Kite has not priced yet is held at cost rather than marked to a
-    /// zero it never quoted. Returns the price to use and whether it is a
-    /// stand-in.
-    private func priced(_ last: Decimal, _ avg: Decimal) -> (price: Decimal, awaiting: Bool) {
-        let awaiting = last <= 0 && avg > 0
-        return (awaiting ? avg : last, awaiting)
+    /// Daily closes for an instrument, most recent last.
+    ///
+    /// Historical data is a paid Kite subscription; an account without it gets a
+    /// 403 / `PermissionException`, surfaced as `isSubscriptionFailure` so the
+    /// caller can fall back to the locally accumulated series instead of
+    /// prompting for a re-login.
+    func historicalCloses(instrumentToken: String, days: Int = 40) async throws -> [Double] {
+        await ensureCredentialsLoaded()
+
+        let end = Date()
+        let start = Calendar(identifier: .gregorian).date(byAdding: .day, value: -days, to: end) ?? end
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        formatter.timeZone = TimeZone(identifier: "Asia/Kolkata")
+
+        // The query goes through `query:`, not the path: `request` builds its URL
+        // with `appendingPathComponent`, which would percent-escape the `?` and
+        // turn the whole thing into one nonsense path segment.
+        let candles = try await request(
+            path: "/instruments/historical/\(instrumentToken)/day",
+            method: "GET",
+            responseType: HistoricalCandles.self,
+            query: [
+                "from": formatter.string(from: start),
+                "to": formatter.string(from: end)
+            ]
+        )
+
+        // Each candle is [timestamp, open, high, low, close, volume]; index 4 is
+        // the close, and anything shorter is malformed rather than fatal.
+        return candles.candles.compactMap { candle -> Double? in
+            guard candle.count > 4 else { return nil }
+            return candle[4].doubleValue
+        }
     }
 
     // MARK: - HTTP
@@ -233,13 +185,21 @@ actor KiteService {
         path: String,
         method: String,
         responseType: T.Type,
-        extraHeaders: [String: String] = [:]
+        extraHeaders: [String: String] = [:],
+        query: [String: String] = [:]
     ) async throws -> T {
         guard let token = accessToken, !apiKey.isEmpty else {
             throw KiteError("Not authenticated")
         }
 
-        var urlRequest = URLRequest(url: baseURL.appendingPathComponent(path))
+        var url = baseURL.appendingPathComponent(path)
+        if !query.isEmpty {
+            var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+            components?.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) }
+            url = components?.url ?? url
+        }
+
+        var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = method
         urlRequest.setValue("3", forHTTPHeaderField: "X-Kite-Version")
         urlRequest.setValue("token \(apiKey):\(token)", forHTTPHeaderField: "Authorization")
@@ -258,6 +218,15 @@ actor KiteService {
                 accessToken = nil
                 try? await credentialVault.clearAccessToken()
                 throw KiteError(payload?.message ?? "Session expired", isAuthFailure: true)
+            }
+            // A valid session asking for an endpoint the account does not pay
+            // for -- historical data, chiefly. Signing in again would not help,
+            // so this must not be reported as an auth failure.
+            if payload?.error_type == "PermissionException" {
+                throw KiteError(
+                    payload?.message ?? "Not subscribed",
+                    isSubscriptionFailure: true
+                )
             }
             throw KiteError(payload?.message ?? "Not authorized", isAuthFailure: true)
         }
@@ -372,6 +341,35 @@ struct UserProfile: Decodable {
     let user_name: String?
 }
 
+/// `/instruments/historical` returns candles as heterogeneous arrays --
+/// `["2026-08-07T00:00:00+0530", 1512.0, 1530.4, 1508.0, 1526.6, 41235]` -- so
+/// the elements decode through a small any-scalar box rather than as `[Double]`,
+/// which would throw on the leading timestamp string.
+struct HistoricalCandles: Decodable {
+    let candles: [[CandleValue]]
+}
+
+enum CandleValue: Decodable {
+    case number(Double)
+    case text(String)
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let value = try? container.decode(Double.self) {
+            self = .number(value)
+        } else {
+            self = .text((try? container.decode(String.self)) ?? "")
+        }
+    }
+
+    /// `nil` for the timestamp, so a malformed candle contributes no point
+    /// rather than a zero that would collapse the chart's range.
+    var doubleValue: Double? {
+        if case .number(let value) = self { return value }
+        return nil
+    }
+}
+
 struct TokenResponse: Decodable {
     let data: SessionData?
     let message: String?
@@ -382,79 +380,20 @@ struct SessionData: Decodable {
     let user_name: String?
 }
 
-struct EquityHolding: Decodable {
-    let tradingsymbol: String
-    let quantity: Decimal
-    let t1_quantity: Decimal?
-    let average_price: Decimal
-    let last_price: Decimal
-    let close_price: Decimal?
-    let day_change: Decimal?
-    let pnl: Decimal?
-}
-
-struct MFHolding: Decodable {
-    /// Kite sends this as `fund`, not `fund_name`. Decoding the wrong key made
-    /// every fund fall through to the "Awaiting allotment" placeholder.
-    let fundName: String
-    let tradingsymbol: String?
-    let quantity: Decimal
-    let average_price: Decimal
-    let last_price: Decimal
-    /// Kite's own P&L. The MF endpoint returns a literal 0 for holdings it has
-    /// not computed, so a zero here is an absence, not a fact -- see PnlMath.
-    let pnl: Decimal?
-
-    enum CodingKeys: String, CodingKey {
-        case fundName = "fund"
-        case tradingsymbol, quantity, average_price, last_price, pnl
-    }
-}
-
-struct Holding: Identifiable, Hashable {
-    /// Stable across refreshes: a symbol identifies the same row from one fetch
-    /// to the next. A fresh UUID per rebuild would make SwiftUI treat every
-    /// refresh as a wholly new list, dropping row animation and hover state.
-    var id: String { "\(isMutualFund ? "mf" : "eq"):\(symbol)" }
-
-    let symbol: String
-    let qty: Decimal
-    let avgPrice: Decimal
-    let lastPrice: Decimal
-    let isMutualFund: Bool
-    let awaitingPrice: Bool
-    let apiPnl: Decimal?
-
-    var invested: Decimal { PnlMath.invested(qty: qty, avgPrice: avgPrice) }
-
-    var pnl: Decimal {
-        PnlMath.pnl(qty: qty, avgPrice: avgPrice, lastPrice: lastPrice,
-                    apiPnl: apiPnl, awaitingPrice: awaitingPrice)
-    }
-
-    var current: Decimal {
-        PnlMath.current(qty: qty, avgPrice: avgPrice, lastPrice: lastPrice,
-                        apiPnl: apiPnl, awaitingPrice: awaitingPrice)
-    }
-
-    var pnlPct: Decimal { PnlMath.pnlPct(pnl: pnl, invested: invested) }
-}
-
-struct PortfolioData {
-    let dayPnl: Decimal
-    let dayPnlPct: Decimal
-    let holdings: [Holding]
-}
-
 struct KiteError: LocalizedError {
     let message: String
     /// Set when Kite rejected the session, so callers can prompt a re-login
     /// instead of string-matching the message text.
     let isAuthFailure: Bool
+    /// Set when the endpoint exists but this account does not subscribe to it --
+    /// historical data is a paid add-on. Distinct from `isAuthFailure`: the
+    /// session is perfectly valid, so prompting for a re-login would be wrong.
+    let isSubscriptionFailure: Bool
 
-    init(_ message: String, isAuthFailure: Bool = false) {
+    init(_ message: String, isAuthFailure: Bool = false, isSubscriptionFailure: Bool = false) {
         self.message = message
         self.isAuthFailure = isAuthFailure
+        self.isSubscriptionFailure = isSubscriptionFailure
     }
 
     var errorDescription: String? { message }
