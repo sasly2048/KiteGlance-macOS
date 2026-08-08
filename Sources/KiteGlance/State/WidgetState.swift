@@ -13,6 +13,37 @@ struct WidgetState: Codable {
     // `windowLevel` removed: it was persisted but never read. `pinMode` is what
     // actually drives the window level.
 
+    /// Minutes between auto-refreshes; 0 is off. Read through
+    /// `effectiveRefreshIntervalMinutes`, never directly.
+    var refreshIntervalMinutes: Int = RefreshInterval.default
+    var themeMode: ThemeMode = .system
+
+    /// Accounts are a label list. Whether any of them can actually be *used* is
+    /// a question only the Keychain can answer -- see `resolvedAccountId`.
+    var accounts: [AccountRef] = []
+    var activeAccountId: String?
+
+    /// The stored interval clamped into a schedulable range; `nil` when off.
+    /// Clamped on read so a value persisted by an older build, or edited into
+    /// the JSON by hand, still cannot schedule a runaway timer.
+    var effectiveRefreshIntervalMinutes: Int? {
+        RefreshInterval.effective(refreshIntervalMinutes)
+    }
+
+    /// The account to actually use, or `nil` if none of the remembered accounts
+    /// has credentials stored.
+    ///
+    /// `probe` is a parameter rather than a stored property on purpose: this
+    /// type is `Codable` and crosses actor boundaries, and a closure is neither
+    /// encodable nor `Sendable`.
+    func resolvedAccountId(probe: (String) -> Bool) -> String? {
+        AccountResolver.resolvedAccountId(
+            accounts: accounts,
+            activeAccountId: activeAccountId,
+            probe: probe
+        )
+    }
+
     private static let fileName = "widget-state.json"
 
     static var fileURL: URL {
