@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import KiteGlanceCore
 
 /// Credentials at rest, in the macOS Keychain.
 ///
@@ -37,8 +38,7 @@ actor CredentialVault {
     private var accessTokenAccount: String { suffixed("access-token") }
 
     private func suffixed(_ base: String) -> String {
-        guard let accountId, !accountId.isEmpty else { return base }
-        return "\(base)@\(accountId)"
+        KeychainNaming.itemName(base: base, accountId: accountId)
     }
 
     init(service: String = "com.kiteglance.vault", accountId: String? = nil) {
