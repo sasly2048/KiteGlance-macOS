@@ -5,7 +5,8 @@ import os.log
 
 actor KiteService {
     private let baseURL = URL(string: "https://api.kite.trade")!
-    private let credentialVault = CredentialVault()
+    /// Rebound by `useAccount`, because each account has its own Keychain items.
+    private var credentialVault = CredentialVault()
     private let amfiNav = AmfiNavService()
     private let logger = Logger(subsystem: "com.kiteglance", category: "KiteService")
 
@@ -38,6 +39,26 @@ actor KiteService {
     func reloadCredentials() async {
         didLoadCredentials = true
         await loadCredentials()
+    }
+
+    /// Points this service at one account's Keychain items and reloads.
+    ///
+    /// The credentials are cleared first: if the new account turns out to have
+    /// none, the service must end up unauthenticated rather than quietly
+    /// carrying the previous account's key and showing its portfolio under
+    /// another account's name.
+    func useAccount(_ accountId: String?) async {
+        credentialVault = CredentialVault(accountId: accountId)
+        apiKey = ""
+        accessToken = nil
+        didLoadCredentials = true
+        await loadCredentials()
+    }
+
+    /// The signed-in user, used to label the account in the menu.
+    func currentProfile() async throws -> UserProfile {
+        await ensureCredentialsLoaded()
+        return try await request(path: "/user/profile", method: "GET", responseType: UserProfile.self)
     }
 
     /// Whether an API key is configured at all. Distinguishes "never set up"

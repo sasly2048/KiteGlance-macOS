@@ -98,6 +98,17 @@ struct Palette: Sendable {
     }
 }
 
+extension NSAppearance {
+    /// Whether this appearance is one of the dark variants.
+    ///
+    /// `bestMatch` rather than a name comparison: the effective appearance may
+    /// be `darkAqua`, `vibrantDark`, or a high-contrast variant of either, and
+    /// only asking it to match against the two roots covers all of them.
+    var isDark: Bool {
+        bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+    }
+}
+
 private struct PaletteKey: EnvironmentKey {
     /// Dark is the app's original and only look, so it is the safe default for
     /// any view rendered outside an injected hierarchy (previews included).
