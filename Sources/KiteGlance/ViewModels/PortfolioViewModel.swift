@@ -62,7 +62,6 @@ struct HoldingViewModel: Identifiable, Equatable {
     let apiPnl: Decimal?
 
     let symbol: String
-    let pnlColor: Color
 
     init(holding: Holding) {
         self.id = holding.id
@@ -74,7 +73,6 @@ struct HoldingViewModel: Identifiable, Equatable {
         self.awaitingPrice = holding.awaitingPrice
         self.apiPnl = holding.apiPnl
         self.symbol = Money.prettyName(holding.symbol)
-        self.pnlColor = Self.color(for: holding)
     }
 
     var invested: Decimal { PnlMath.invested(qty: qty, avgPrice: avgPrice) }
@@ -101,9 +99,21 @@ struct HoldingViewModel: Identifiable, Equatable {
         + "\n\nClick to copy symbol"
     }
 
-    static func color(for holding: Holding) -> Color {
-        if holding.awaitingPrice { return Color(white: 1, opacity: 0.3) }
-        return holding.pnl >= 0 ? Color(red: 0x32/255, green: 0xD7/255, blue: 0x4B/255) : Color(red: 0xFF/255, green: 0x45/255, blue: 0x3A/255)
+    /// Takes the palette rather than baking a colour in at init: the same row
+    /// is drawn in either theme, and the accents differ between them.
+    func pnlColor(_ palette: Palette) -> Color {
+        if awaitingPrice { return palette.unpriced }
+        return pnl >= 0 ? palette.positive : palette.negative
+    }
+
+    /// One sentence for VoiceOver, in place of four loose numbers.
+    var accessibilityValue: String {
+        if awaitingPrice {
+            return "\(Money.rupees(invested)) invested. Not priced by Kite yet."
+        }
+        let direction = pnl >= 0 ? "up" : "down"
+        return "\(Money.rupees(invested)) invested, now worth \(Money.rupees(current)). "
+            + "\(direction) \(Money.rupees(abs(pnl))), \(Money.percent(pnlPct))."
     }
 }
 
@@ -179,8 +189,24 @@ class PortfolioViewModel: ObservableObject {
         activeTab == "funds" ? "Overall" : "Today"
     }
 
-    var heroColor: Color {
-        heroValue >= 0 ? Color(red: 0x32/255, green: 0xD7/255, blue: 0x4B/255) : Color(red: 0xFF/255, green: 0x45/255, blue: 0x3A/255)
+    func heroColor(_ palette: Palette) -> Color {
+        heroValue >= 0 ? palette.positive : palette.negative
+    }
+
+    /// Recent price windows, keyed by raw symbol, for the row sparklines.
+    @Published var priceHistory: PriceHistory = PriceHistory()
+
+    /// The market-open pulse is an animation, which VoiceOver cannot perceive at
+    /// all. This is the same fact in words.
+    var marketStatusDescription: String {
+        isMarketOpen ? "Market open" : "Market closed"
+    }
+
+    /// The hero figure as a sentence, so the largest number on the widget is not
+    /// announced as a bare amount with no indication of what it measures.
+    var heroAccessibilityValue: String {
+        let direction = heroValue >= 0 ? "up" : "down"
+        return "\(direction) \(Money.rupees(abs(heroValue))), \(Money.percent(heroPct))"
     }
 
     /// NSE cash session: Mon-Fri, 09:15-15:30 IST. Explicitly Gregorian --
