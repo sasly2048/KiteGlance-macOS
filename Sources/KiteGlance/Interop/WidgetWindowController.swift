@@ -229,6 +229,16 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
         state.save()
         applyAppearance()
         setupView()
+        // The status menu is built by the app delegate and carries its own
+        // appearance and tick marks, neither of which the SwiftUI environment
+        // reaches -- without this it stays in the old theme until something
+        // else happens to rebuild it.
+        rebuildStatusMenu()
+    }
+
+    /// Asks the app delegate to rebuild the status-bar menu.
+    private func rebuildStatusMenu() {
+        (NSApp.delegate as? AppDelegate)?.refreshStatusMenu()
     }
 
     func applyAppearance() {
@@ -335,6 +345,7 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
                     .filter { !$0.awaitingPrice }
                     .map { (symbol: $0.symbol, price: $0.lastPrice) }
             )
+            await seedHistoricalSeries(for: portfolio.holdings)
             viewModel.priceHistory = await priceHistory.allSeries()
             viewModel.usingStaleNavs = await kiteService.usingStaleFundNavs
             viewModel.errorMessage = nil
@@ -351,6 +362,23 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
         }
 
         viewModel.isLoading = false
+    }
+
+    /// Fills each equity row's series from Kite's historical endpoint, for
+    /// accounts that subscribe to it.
+    ///
+    /// Only for rows the local accumulation has not already filled, and the
+    /// service stops asking after the first `PermissionException` -- most
+    /// accounts do not pay for this, and that is a normal answer, not an error.
+    /// Mutual funds are skipped: there is no historical instrument for a fund.
+    private func seedHistoricalSeries(for holdings: [Holding]) async {
+        for holding in holdings where !holding.isMutualFund {
+            guard let token = holding.instrumentToken else { continue }
+
+            await priceHistory.seedFromHistorical(symbol: holding.symbol) {
+                try await self.kiteService.historicalCloses(instrumentToken: String(token))
+            }
+        }
     }
 
     func checkSession() async {
@@ -481,12 +509,15 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
             guard let resolved = await resolvedAccountId() else {
                 viewModel.portfolio = nil
                 promptToConnect()
+                rebuildStatusMenu()
                 return
             }
 
             await kiteService.useAccount(resolved)
             viewModel.portfolio = nil
             await bootstrap()
+            // Move the tick to the account that is actually active now.
+            rebuildStatusMenu()
         }
     }
 

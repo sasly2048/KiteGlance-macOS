@@ -162,6 +162,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         activeAccountId = await widgetController?.activeAccountId
     }
 
+    /// Rebuilds the status-bar menu so its tick marks and appearance match the
+    /// current theme and active account.
+    ///
+    /// Assigning a fresh menu is what actually updates it: `refreshActiveAccount`
+    /// only sets the variable that `buildStatusMenu` reads.
+    func refreshStatusMenu() {
+        Task { @MainActor in
+            await refreshActiveAccount()
+            statusItem?.menu = buildStatusMenu()
+        }
+    }
+
     private func createWidgetWindow() {
         widgetController = WidgetWindowController()
     }
@@ -192,17 +204,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func switchAccount(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
+        // switchToAccount resolves asynchronously and rebuilds this menu when it
+        // lands -- reticking here would use the pre-switch answer.
         widgetController?.switchToAccount(id)
-        Task { await refreshActiveAccount() }
     }
 
     @objc private func setTheme(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String,
               let mode = ThemeMode(rawValue: raw) else { return }
+        // setThemeMode rebuilds the status menu itself, so the tick moves and
+        // the menu repaints in the new appearance.
         widgetController?.setThemeMode(mode)
-        // The status menu is rebuilt so the tick moves and the menu itself
-        // repaints in the new appearance.
-        statusItem?.menu = buildStatusMenu()
     }
 
     @objc private func openSettings() {

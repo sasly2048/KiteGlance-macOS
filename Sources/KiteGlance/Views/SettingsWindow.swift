@@ -20,12 +20,22 @@ struct SettingsWindow: View {
     @State private var refreshIntervalMinutes: Int = RefreshInterval.default
     @State private var themeMode: ThemeMode = .system
 
-    @Environment(\.palette) private var palette
+    @Environment(\.colorScheme) private var colorScheme
+
+    /// Resolved from the live picker value rather than read from the
+    /// environment: this view *provides* the palette below, so reading the
+    /// inherited one here would lag a change by a frame.
+    private var palette: Palette {
+        Palette.of(ResolvedTheme.resolve(mode: themeMode, systemIsDark: colorScheme == .dark))
+    }
 
     /// Applied as the user changes them, not on Save: these are preferences, not
     /// credentials, and a picker that only takes effect after pressing Save
     /// beside two text fields reads as though it did nothing.
     let onPreferencesChange: (Int, ThemeMode) -> Void
+    /// Re-themes the NSWindow itself. The SwiftUI environment does not reach
+    /// the titlebar or the blur material behind this view.
+    let onChrome: (ThemeMode) -> Void
     let initialRefreshIntervalMinutes: Int
     let initialThemeMode: ThemeMode
 
@@ -34,6 +44,7 @@ struct SettingsWindow: View {
         refreshIntervalMinutes: Int = RefreshInterval.default,
         themeMode: ThemeMode = .system,
         onPreferencesChange: @escaping (Int, ThemeMode) -> Void = { _, _ in },
+        onChrome: @escaping (ThemeMode) -> Void = { _ in },
         onSave: @escaping () -> Void,
         onClose: @escaping () -> Void
     ) {
@@ -41,11 +52,26 @@ struct SettingsWindow: View {
         self.initialRefreshIntervalMinutes = refreshIntervalMinutes
         self.initialThemeMode = themeMode
         self.onPreferencesChange = onPreferencesChange
+        self.onChrome = onChrome
         self.onSave = onSave
         self.onClose = onClose
     }
 
     var body: some View {
+        content
+            // Driven by the live `themeMode` @State, so changing the Appearance
+            // picker re-themes this window immediately.
+            .environment(\.palette, .of(ResolvedTheme.resolve(
+                mode: themeMode,
+                systemIsDark: colorScheme == .dark
+            )))
+            .preferredColorScheme(
+                ResolvedTheme.resolve(mode: themeMode, systemIsDark: colorScheme == .dark) == .dark
+                    ? .dark : .light
+            )
+    }
+
+    private var content: some View {
         VStack(spacing: 0) {
             // Header
             HStack {
@@ -216,6 +242,7 @@ struct SettingsWindow: View {
         }
         .onChange(of: themeMode) { _, _ in
             onPreferencesChange(refreshIntervalMinutes, themeMode)
+            onChrome(themeMode)
         }
     }
 
@@ -284,6 +311,14 @@ final class SettingsWindowController: NSWindowController {
             refreshIntervalMinutes: refreshIntervalMinutes,
             themeMode: themeMode,
             onPreferencesChange: onPreferencesChange,
+            onChrome: { [weak window] mode in
+                window?.appearance = NSAppearance(
+                    named: Palette.of(ResolvedTheme.resolve(
+                        mode: mode,
+                        systemIsDark: NSApp.effectiveAppearance.isDark
+                    )).appearance
+                )
+            },
             onSave: onSave,
             onClose: { [weak window] in window?.close() }
         )
@@ -308,7 +343,10 @@ final class SettingsWindowController: NSWindowController {
         effect.frame = window.contentView?.bounds ?? .zero
         effect.autoresizingMask = [.width, .height]
 
-        let hostingView = NSHostingView(rootView: ThemedContainer(mode: themeMode) { view })
+        // `view` themes itself from its own @State via ThemedContainer in its
+        // body, so the picker re-themes live. Wrapping it here in a container
+        // built from the *initial* mode would freeze it at launch instead.
+        let hostingView = NSHostingView(rootView: view)
         hostingView.frame = effect.bounds
         hostingView.autoresizingMask = [.width, .height]
 

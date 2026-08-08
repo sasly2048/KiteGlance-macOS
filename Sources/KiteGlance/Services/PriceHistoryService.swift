@@ -19,8 +19,12 @@ actor PriceHistoryService {
     private var history: PriceHistory
     private var didLoad = false
 
-    /// Symbols already known to have no historical access, so a 403 is paid for
-    /// once per launch rather than on every refresh.
+    /// Set once this account is known to lack the historical subscription.
+    ///
+    /// Deliberately one flag for the whole service rather than a per-symbol set:
+    /// the subscription is an account-level entitlement, so a `PermissionException`
+    /// for one instrument means every instrument will refuse too. One 403 per
+    /// launch is the most this should ever cost.
     private var historicalUnavailable = false
 
     init(fileName: String = "price-history.json") {

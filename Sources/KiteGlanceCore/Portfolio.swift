@@ -11,6 +11,9 @@ import Foundation
 
 public struct EquityHolding: Decodable, Sendable {
     public let tradingsymbol: String
+    /// Needed to ask `/instruments/historical` for this instrument. Optional
+    /// because it is absent from older recorded payloads and from mutual funds.
+    public let instrument_token: Int?
     public let quantity: Decimal
     public let t1_quantity: Decimal?
     public let average_price: Decimal
@@ -21,6 +24,7 @@ public struct EquityHolding: Decodable, Sendable {
 
     public init(
         tradingsymbol: String,
+        instrument_token: Int? = nil,
         quantity: Decimal,
         t1_quantity: Decimal? = nil,
         average_price: Decimal,
@@ -30,6 +34,7 @@ public struct EquityHolding: Decodable, Sendable {
         pnl: Decimal? = nil
     ) {
         self.tradingsymbol = tradingsymbol
+        self.instrument_token = instrument_token
         self.quantity = quantity
         self.t1_quantity = t1_quantity
         self.average_price = average_price
@@ -87,6 +92,9 @@ public struct Holding: Identifiable, Hashable, Sendable {
     public let isMutualFund: Bool
     public let awaitingPrice: Bool
     public let apiPnl: Decimal?
+    /// Equity only. Mutual funds have no historical instrument, which is why
+    /// they use the locally accumulated series.
+    public let instrumentToken: Int?
 
     public init(
         symbol: String,
@@ -95,7 +103,8 @@ public struct Holding: Identifiable, Hashable, Sendable {
         lastPrice: Decimal,
         isMutualFund: Bool,
         awaitingPrice: Bool,
-        apiPnl: Decimal?
+        apiPnl: Decimal?,
+        instrumentToken: Int? = nil
     ) {
         self.symbol = symbol
         self.qty = qty
@@ -104,6 +113,7 @@ public struct Holding: Identifiable, Hashable, Sendable {
         self.isMutualFund = isMutualFund
         self.awaitingPrice = awaitingPrice
         self.apiPnl = apiPnl
+        self.instrumentToken = instrumentToken
     }
 
     public var invested: Decimal { PnlMath.invested(qty: qty, avgPrice: avgPrice) }
@@ -195,7 +205,8 @@ public enum PortfolioAssembler {
                 lastPrice: lastPrice,
                 isMutualFund: false,
                 awaitingPrice: awaiting,
-                apiPnl: h.pnl
+                apiPnl: h.pnl,
+                instrumentToken: h.instrument_token
             ))
         }
 
