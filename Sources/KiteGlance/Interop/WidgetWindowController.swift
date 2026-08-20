@@ -81,20 +81,29 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
     private func restorePosition() {
         guard let window, let screen = window.screen ?? NSScreen.main else { return }
         let visibleFrame = screen.visibleFrame
+        let windowW = window.frame.width
+        let windowH = window.frame.height
+        let margin: CGFloat = 20
 
         if state.position != .zero && isOnScreen(state.position, screen: screen) {
-            window.setFrameOrigin(state.position)
+            // Clamp strictly inside visible frame (accounting for menu bar and dock)
+            let clampedX = max(visibleFrame.minX + margin, min(state.position.x, visibleFrame.maxX - windowW - margin))
+            let clampedY = max(visibleFrame.minY + margin, min(state.position.y, visibleFrame.maxY - windowH - margin))
+            window.setFrameOrigin(NSPoint(x: clampedX, y: clampedY))
         } else {
-            let x = visibleFrame.maxX - window.frame.width - 24
-            let y = visibleFrame.maxY - 24
+            // Default: Top-right corner below menu bar
+            let x = visibleFrame.maxX - windowW - 24
+            let y = visibleFrame.maxY - windowH - 24
             window.setFrameOrigin(NSPoint(x: x, y: y))
         }
     }
 
     private func isOnScreen(_ point: CGPoint, screen: NSScreen) -> Bool {
-        let frame = screen.frame
-        return point.x >= frame.minX - 40 && point.x <= frame.maxX + 80 &&
-               point.y >= frame.minY - 10 && point.y <= frame.maxY + 60
+        let visibleFrame = screen.visibleFrame
+        return point.x >= visibleFrame.minX - 50 &&
+               point.x <= visibleFrame.maxX &&
+               point.y >= visibleFrame.minY &&
+               point.y <= visibleFrame.maxY
     }
 
     func savePosition() {
@@ -607,23 +616,20 @@ class WidgetWindow: NSWindow {
         }
     }
 
-    /// The drag strip along the top of the widget, in points. Everything below
-    /// it belongs to SwiftUI.
-    private let dragHandleHeight: CGFloat = 44
+    /// The drag strip height along the top of the widget.
+    private let dragHandleHeight: CGFloat = 36
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 
     override func mouseDown(with event: NSEvent) {
-        // The old test asked whether the hit view was the NSHostingView -- which
-        // is the entire window -- so every click anywhere, including on buttons
-        // and tabs, started a window drag. Only the header strip drags.
-        //
-        // locationInWindow is bottom-left origin, so the header is the *top*
-        // `dragHandleHeight` points of the frame.
-        let isInHeader = event.locationInWindow.y >= frame.height - dragHandleHeight
+        // locationInWindow is in window coordinates (bottom-left = (0,0)).
+        // The header is at the very top of the window frame.
+        let isInTopHeader = event.locationInWindow.y >= frame.height - dragHandleHeight
+        let isInRightMenuArea = event.locationInWindow.x >= frame.width - 60
 
-        if isInHeader {
+        // Allow dragging from top header strip, except over the ⋯ menu button area on the far right
+        if isInTopHeader && !isInRightMenuArea {
             performDrag(with: event)
         } else {
             super.mouseDown(with: event)
