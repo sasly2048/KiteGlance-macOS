@@ -58,6 +58,58 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (parity with the Windows fix #29). The old code silently returned, so
   a half-written file would erase days of price points without trace.
 
+### Premium-grade refinements
+
+Premium means more than the feature list; it means the
+high-frequency paths (a user hitting `R` twice, an arrow-key press
+during a refresh, a Settings typo while a quote is being copied) all
+behave the way a user would expect from a Mac-native product. Four
+Windows-compatibility gaps were closed in this pass; the fifth is a
+macOS-version-aware visual upgrade that ships on 15-25 with the
+existing blur and adopts the new look on 26.
+
+- **Manual-refresh 60-second throttle with a "Just synced a moment
+  ago" toast** (parity with the Windows 1.5.0 fix). Pressing `R` twice
+  in a second used to fire two Kite calls. Now the second press is a
+  no-op and the user sees the same toast the Windows client has shown
+  since 1.5.0. The cooldown lives on `PortfolioViewModel`, exposed via a
+  `@Published lastManualSync` and a `canRefreshManually(now:)` accessor,
+  so the same rule applies to the status-bar `Refresh Now` menu item.
+
+- **Arrow-key navigation and Enter-to-copy in the holdings list**
+  (parity with the Windows ListBox `OnKeyDown` path). Each row is now
+  `focusable()` on macOS 13+; up/down arrows move a `selectedRowIndex`
+  in the view model and Enter (or numpad-Enter) copies the focused
+  row's ticker to the clipboard. Selecting a row highlights it with the
+  same surface tint the hover state uses. The `Window.keyDown` handler
+  stays in the AppKit override so the navigation works whether the
+  SwiftUI hosting view or the AppKit row is the first responder.
+
+- **Skeleton overlay wired into `body`.** The `@State` `showSkeleton`
+  is now read in `body` and the dedicated `skeletonOverlay` view is
+  rendered as a sibling layer above the backdrop during the first paint.
+  The skeleton fades out in 340ms once `initialize()` has handed
+  control back to the live layout, matching the Windows `Bone` style.
+
+- **Liquid Glass on macOS 26+.** The widget and Settings backdrops
+  now use `NSVisualEffectView.Material.glass` on macOS 26 (Tahoe) and
+  fall through to `.hudWindow` on 15-25. The helper lives in
+  `Sources/KiteGlance/Interop/VisualEffectMaterial.swift`; the floor
+  stays at 15, no `@available` checks leak into the call sites, and the
+  appearance is selected at `NSVisualEffectView.widgetMaterial`. A
+  2023 MacBook on 15 sees the legacy blur, a 2026 Mac Studio on 26
+  sees Liquid Glass, and the SwiftUI hierarchy above paints the
+  same pixels in both cases.
+
+- **Settings-focus guard for keyboard shortcuts.** Enter and numpad
+  Enter used to also fall through to the pane-toggle when the row
+  had no selection. The new `activateSelectedRow()` short-circuits
+  only when there IS a selection; the Space-only path keeps the
+  pane toggle. Inside Settings, the existing `!focusIsOnEditableControl`
+  guard already routes Enter to the text editor, so this is a
+  no-op there. Same intent as the Windows `when !FocusIsOnAControl()`
+  guard from 1.5.0.
+
 ## [1.5.0] - 2026-08-29
 
 Bridging pass that aligns the Mac repo with the Windows 1.5.0 baseline.

@@ -18,7 +18,7 @@ This codebase aims for feature parity with the Windows build but is on a differe
 - **OAuth loopback** — Captures redirect on `http://127.0.0.1:5173/callback`
 - **Auto-refresh** — Every 5 minutes during market hours
 - **Intraday sparklines** — Subscribed Kite accounts get 5-minute candles down-sampled to fit each row's chart; the resulting series is frozen so the per-refresh `last_price` does not pile a single non-aligned point on the right edge
-- **Keyboard shortcuts** — Space/Enter to expand, Esc to collapse, R to refresh, Tab to switch tabs
+- **Keyboard shortcuts** — Space/Enter to expand, Esc to collapse, R to refresh, Tab to switch tabs, **Up/Down arrows to navigate holdings, Enter to copy the selected ticker to the clipboard**
 - **Status bar menu** — Pin modes, backgrounds, settings, quit
 
 ## Requirements
@@ -190,7 +190,8 @@ export KITEGLANCE_DEBUG=1  # enables debug logging
 Sources/KiteGlance/
 ├── App.swift                    # App entry, status bar, single instance
 ├── Interop/
-│   └── WidgetWindowController.swift  # Borderless window at desktop level
+│   ├── WidgetWindowController.swift  # Borderless window at desktop level
+│   ├── VisualEffectMaterial.swift     # macOS 15-25 → .hudWindow, 26+ → .glass (Liquid Glass)
 ├── Services/
 │   ├── KiteService.swift        # Kite Connect API + portfolio assembly
 │   ├── AmfiNavService.swift     # Live MF NAVs from AMFI (cached daily)

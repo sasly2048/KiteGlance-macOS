@@ -409,7 +409,7 @@ final class SettingsWindowController: NSWindowController {
         )
 
         let effect = NSVisualEffectView()
-        effect.material = .hudWindow
+        effect.material = NSVisualEffectView.widgetMaterial
         effect.blendingMode = .behindWindow
         effect.state = .active
         effect.frame = window.contentView?.bounds ?? .zero

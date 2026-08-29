@@ -10,11 +10,12 @@ import PackageDescription
 //   * `MenuItem.submenu` is a property setter, not a constructor (macOS 14+)
 //   * `KiteService.request(...)` uses the async URLSession data(for:) overload
 //
-// Nothing in the codebase calls any macOS 26-only API directly. The Liquid
-// Glass `NSVisualEffectView` material (.hudWindow) is the highest-versioned
-// AppKit symbol in use, and it is the same on 15 through 26 -- it just looks
-// different on 26. We use the same on every version so the widget looks the
-// same on a 2023 MacBook as on a 2026 Mac Studio.
+// The new Liquid Glass `NSVisualEffectView.Material.glass` is macOS 26+.
+// `VisualEffectMaterial.swift` wraps it in `if #available(macOS 26.0, *)`
+// and falls back to `.hudWindow` on 15-25, so the floor stays at 15. The
+// widget looks the same on a 2023 MacBook as on a 2026 Mac Studio -- the
+// OS draws the vibrancy layer differently, but the painted SwiftUI pixels
+// are identical.
 let package = Package(
     name: "KiteGlance",
     platforms: [

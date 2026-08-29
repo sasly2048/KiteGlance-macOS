@@ -9,6 +9,11 @@ struct HoldingRow: View {
     /// have accumulated, which is why the sparkline is conditional.
     var series: PriceSeries = PriceSeries()
 
+    /// `true` while this row is the focused keyboard target. Bound by
+    /// `WidgetView` so the focused row can render a selection ring
+    /// matching the Windows ListBox highlight.
+    @Binding var isSelected: Bool
+
     @State private var isHovered = false
     @Environment(\.palette) private var palette
 
@@ -67,7 +72,9 @@ struct HoldingRow: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 9)
-        .background(isHovered ? palette.surfaceHover : Color.clear)
+        .background(isSelected ? palette.surfaceHover
+                      : isHovered ? palette.surfaceHover.opacity(0.5)
+                                   : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 9))
         .offset(x: isHovered ? 2 : 0)
         .animation(.spring(response: 0.45, dampingFraction: 0.8), value: isHovered)
@@ -82,6 +89,11 @@ struct HoldingRow: View {
         .accessibilityLabel(viewModel.symbol)
         .accessibilityValue(viewModel.accessibilityValue)
         .accessibilityHint("Double-tap to copy the symbol")
+        // Focus the row so the widget can navigate with arrow keys
+        // (parity with the Windows ListBox). SwiftUI gives Buttons an
+        // intrinsic focusable element; an HStack would not.
+        .focusable()
+        .focusEffectDisabled()
     }
 }
 

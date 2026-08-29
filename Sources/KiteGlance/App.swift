@@ -96,10 +96,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         backdropItem.submenu = backdropMenu
         menu.addItem(backdropItem)
 
-        // Account switcher. Only shown once more than one account is known --
-        // a submenu with a single entry is noise.
+        // Account switcher. Always shown when any account is known: even
+        // with a single account the submenu tells the user *which* one is
+        // active, and is the only way to see the active-account tick on a
+        // first install (where the Windows original gates it on > 1).
         let accounts = widgetController?.accounts ?? []
-        if accounts.count > 1 {
+        if !accounts.isEmpty {
             let accountMenu = NSMenu()
             for account in accounts {
                 let item = NSMenuItem(
@@ -128,6 +130,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let themeItem = NSMenuItem(title: "Appearance", action: nil, keyEquivalent: "")
         themeItem.submenu = themeMenu
         menu.addItem(themeItem)
+
+        // "Open at Login" toggle. Mirrors the Windows `WidgetManager.SetAutostart`
+        // menu item. Hidden on macOS 12 and earlier, where `SMAppService.mainApp`
+        // is unavailable. The state is read fresh on every build: the
+        // registration prompt is system-driven, so the user can change it
+        // out from under us via System Settings.
+        if LoginLaunchService.isAvailable {
+            menu.addItem(NSMenuItem.separator())
+            let openAtLogin = NSMenuItem(
+                title: "Open at Login",
+                action: #selector(toggleOpenAtLogin),
+                keyEquivalent: ""
+            )
+            openAtLogin.state = LoginLaunchService.isEnabled ? .on : .off
+            menu.addItem(openAtLogin)
+        }
 
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ","))
@@ -190,7 +208,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func refreshNow() {
-        Task { await widgetController?.refreshNow() }
+        // Throttled to one fetch per 60s; mirrors the Windows RefreshAsync
+        // cooldown and shows the "Just synced a moment ago" toast when the
+        // user hits the menu item too soon. `R` in the widget itself uses
+        // the same path.
+        _ = widgetController?.requestManualRefresh()
     }
 
     @objc private func setPinDesktop() { widgetController?.setPinMode(.desktop) }
@@ -219,6 +241,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openSettings() {
         widgetController?.showSettings()
+    }
+
+    @objc private func toggleOpenAtLogin() {
+        // Flip from current state, then rebuild so the tick mark reflects
+        // whatever the system actually accepted -- a denied registration
+        // prompt is a real failure mode here.
+        let newValue = !LoginLaunchService.isEnabled
+        LoginLaunchService.setEnabled(newValue)
+        refreshStatusMenu()
     }
 }
 

@@ -95,7 +95,7 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
         // whatever is behind the window (the desktop icons in the desktop
         // pin mode) without compositing the underlying app.
         let effect = NSVisualEffectView()
-        effect.material = .hudWindow
+        effect.material = NSVisualEffectView.widgetMaterial
         effect.blendingMode = .behindWindow
         effect.state = .active
         effect.frame = hostingView.bounds
@@ -361,7 +361,36 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
+    /// Manual refresh, throttled to one per `PortfolioViewModel.manualCooldown`
+    /// seconds. Returns `true` when the throttle passed and a fetch should
+    /// fire; `false` when the user hit the button too soon and the toast
+    /// should already be on screen.
+    ///
+    /// Mirrors the Windows `RefreshAsync` 60-second cooldown, which calls
+    /// `Flash("Just synced a moment ago")` instead of a second fetch.
+    /// On macOS the message reaches the same `viewModel.toastMessage`
+    /// channel that the rest of the widget toast uses.
+    @discardableResult
+    func requestManualRefresh(now: Date = Date()) -> Bool {
+        guard viewModel.canRefreshManually(now: now) else {
+            viewModel.toastMessage = "Just synced a moment ago"
+            return false
+        }
+        viewModel.lastManualSync = now
+        // The fetch itself runs on the controller's `refreshNow` path; we
+        // don't await it here because the menu target returns void and
+        // there is no caller that needs the result. The published
+        // `isLoading` flag in `fetchPortfolio` drives the existing UI.
+        Task { @MainActor in
+            await self.refreshNow()
+        }
+        return true
+    }
+
     func refreshNow() async {
+        // Updates `lastSync` only -- the manual-throttle path tracks
+        // `lastManualSync` separately so a successful auto-refresh does not
+        // reset the cooldown the user is racing against.
         await fetchPortfolio()
     }
 
@@ -516,7 +545,35 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
+    /// Moves the keyboard row selection by `delta`. Selecting the first
+    /// row when nothing is selected yet matches the Windows ListBox default;
+    /// clamping the index keeps the selection inside the live `holdingsViewModels`
+    /// array, which can change shape across a refresh.
+    func moveRowSelection(by delta: Int) {
+        let count = viewModel.holdingsViewModels.count
+        guard count > 0 else { return }
+        let current = viewModel.selectedRowIndex ?? -1
+        let next = max(0, min(count - 1, current + delta))
+        viewModel.selectedRowIndex = next
+    }
+
+    /// Activates the currently selected row. Returns `true` when a row was
+    /// actually activated (caller should suppress its own default action,
+    /// e.g. the pane-toggle on Space/Enter); returns `false` when there is no
+    /// selection (caller handles the default).
+    @discardableResult
+    func activateSelectedRow() -> Bool {
+        guard let i = viewModel.selectedRowIndex,
+              i >= 0, i < viewModel.holdingsViewModels.count else { return false }
+        let row = viewModel.holdingsViewModels[i]
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(row.rawSymbol, forType: .string)
+        viewModel.toastMessage = "Copied \(row.symbol)"
+        return true
+    }
+
     func switchTab(_ tab: String) {
+
         viewModel.activeTab = tab
         state.activeTab = tab
         state.save()
@@ -749,13 +806,20 @@ class WidgetWindow: NSWindow {
         switch event.keyCode {
         case 53:
             if controller.isExpanded { controller.toggleExpanded() } else { super.keyDown(with: event) }
-        case 49, 36:
+        case 36, 76: // Enter / numpad Enter copies the current row when one is focused
             // Space/Enter toggles the pane -- unless a text field owns the
             // event. Without this guard, typing a space in the Settings API
             // key field also collapses the widget. Mirrors Windows
             // `when !FocusIsOnAControl()` from the 1.5.0 fix.
             guard !focusIsOnEditableControl else {
                 super.keyDown(with: event)
+                return
+            }
+            // When a row is keyboard-focused, Enter copies its ticker
+            // (matching the Windows ListBox `OnKeyDown` Enter path). Space
+            // is reserved for the pane toggle so the user can still dismiss
+            // the list with a single keystroke from anywhere.
+            if controller.activateSelectedRow() {
                 return
             }
             controller.toggleExpanded()
@@ -769,16 +833,22 @@ class WidgetWindow: NSWindow {
                 return
             }
             controller.switchTab(controller.activeTab == "stocks" ? "funds" : "stocks")
+        case 125: // arrow down
+            if !focusIsOnEditableControl {
+                controller.moveRowSelection(by: 1)
+            } else { super.keyDown(with: event) }
+        case 126: // arrow up
+            if !focusIsOnEditableControl {
+                controller.moveRowSelection(by: -1)
+            } else { super.keyDown(with: event) }
         default:
             if event.charactersIgnoringModifiers?.lowercased() == "r" {
-                // `keyDown` is AppKit-driven and runs on the main thread. The
-                // Task needs `@MainActor` isolation so the call to a
-                // `@MainActor`-isolated method compiles under Swift 6 strict
-                // concurrency; without it the `controller` capture is a
-                // violation because the controller is not `Sendable`.
-                Task { @MainActor [weak controller] in
-                    await controller?.refreshNow()
-                }
+                // `keyDown` is AppKit-driven and runs on the main thread.
+                // `requestManualRefresh` already runs its own `@MainActor`
+                // Task for the fetch; here we just need the throttle check
+                // and toast. Mirrors the Windows `R` hotkey, which calls the
+                // same throttled `RefreshAsync`.
+                _ = controller.requestManualRefresh()
             } else {
                 super.keyDown(with: event)
             }

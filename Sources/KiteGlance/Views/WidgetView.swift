@@ -26,7 +26,9 @@ struct WidgetView: View {
     /// Tracks the x-offset of the active tab underline bar.
     @State private var tabUnderlineX: CGFloat = 20
     @State private var tabUnderlineWidth: CGFloat = 44
-
+    /// Index of the currently keyboard-focused row in the holdings list.
+    /// `nil` when the list is not focused. The arrow keys move this up and
+    /// down; `Enter` copies the row's ticker to the clipboard (matching
     @Environment(\.palette) private var palette
 
     private let compactHeight: CGFloat = 256
@@ -476,7 +478,13 @@ struct WidgetView: View {
                         ForEach(Array(viewModel.holdingsViewModels.enumerated()), id: \.element.id) { index, holding in
                             HoldingRow(
                                 viewModel: holding,
-                                series: viewModel.priceHistory[holding.rawSymbol]
+                                series: viewModel.priceHistory[holding.rawSymbol],
+                                isSelected: Binding(
+                                    get: { viewModel.selectedRowIndex == index },
+                                    set: { newValue in
+                                        viewModel.selectedRowIndex = newValue ? index : nil
+                                    }
+                                )
                             )
                                 .opacity(rowsVisible ? 1 : 0)
                                 .offset(y: rowsVisible ? 0 : 10)
@@ -486,6 +494,7 @@ struct WidgetView: View {
                                     value: rowsVisible
                                 )
                                 .onTapGesture {
+                                    viewModel.selectedRowIndex = index
                                     copyToPasteboard(holding.rawSymbol)
                                     showToast("Copied \(holding.symbol)")
                                 }

@@ -2,63 +2,6 @@ import Foundation
 import SwiftUI
 import KiteGlanceCore
 
-extension Decimal {
-    var doubleValue: Double { NSDecimalNumber(decimal: self).doubleValue }
-}
-
-struct Money {
-    static let rs = "₹"
-    static let minus = "−"
-
-    static func rupees(_ value: Decimal) -> String {
-        let absValue = abs(value)
-        let sign = value < 0 ? minus : ""
-
-        // Cast to Double for the formatted rounding, then format with the
-        // desired precision. Casting back to Decimal after `rounded(...)` is
-        // not necessary because the formatter only reads the magnitude.
-        let d = absValue.doubleValue
-
-        if absValue >= 10_000_000 {
-            let v = MoneyRounding.halfAwayFromZero(d / 10_000_000)
-            return "\(sign)\(rs)\(v.formatted(.number.precision(.fractionLength(2))))Cr"
-        } else if absValue >= 100_000 {
-            let v = MoneyRounding.halfAwayFromZero(d / 100_000)
-            return "\(sign)\(rs)\(v.formatted(.number.precision(.fractionLength(2))))L"
-        } else if absValue >= 1_000 {
-            // The >= 1_000 path shows whole rupees. Round half up here too:
-            // a rupee total of 999.5 (the half-paisa rounding noise from Kite's
-            // pnl field) should show "₹1,000" on both platforms, not "₹1,000"
-            // here and "₹999" on Windows.
-            let v = MoneyRounding.halfAwayFromZero(d)
-            return "\(sign)\(rs)\(v.formatted(.number.grouping(.automatic).precision(.fractionLength(0))))"
-        } else {
-            return "\(sign)\(rs)\(d.formatted(.number.precision(.fractionLength(2))))"
-        }
-    }
-
-    static func signed(_ value: Decimal) -> String {
-        let prefix = value >= 0 ? "+" : minus
-        return "\(prefix)\(rupees(abs(value)))"
-    }
-
-    static func percent(_ value: Decimal) -> String {
-        let prefix = value >= 0 ? "+" : minus
-        let d = abs(value).doubleValue
-        return "\(prefix)\(MoneyRounding.halfAwayFromZero(d).formatted(.number.precision(.fractionLength(2))))%"
-    }
-
-    static func exact(_ value: Decimal) -> String {
-        let d = value.doubleValue
-        return "\(rs)\(d.formatted(.number.grouping(.automatic).precision(.fractionLength(2))))"
-    }
-
-    /// Lives in KiteGlanceCore so it can be unit tested without AppKit.
-    static func prettyName(_ raw: String) -> String {
-        FundNameFormatter.prettyName(raw)
-    }
-}
-
 /// A struct, not an `ObservableObject`. The old class minted a fresh `UUID` in
 /// every initializer, and `holdingsViewModels` rebuilt the whole array on each
 /// access -- so SwiftUI saw an entirely new identity set on every render and
@@ -137,9 +80,22 @@ class PortfolioViewModel: ObservableObject {
     @Published var isLoading = false
     @Published var errorMessage: String?
     @Published var lastSync: Date?
+    /// Bumped by `attemptManualRefresh` only when a refresh actually fires;
+    /// the toast "Just synced a moment ago" reads from this so a user
+    /// who hits `R` twice in a second sees the throttle message, not a
+    /// second refresh. Mirrors the Windows `_lastManual` from the
+    /// `RefreshAsync` 60-second cooldown.
+    @Published var lastManualSync: Date?
     @Published var usingStaleNavs = false
     @Published var expanded = false
     @Published var activeTab = "stocks" { didSet { rebuildHoldings() } }
+
+    /// Index of the currently keyboard-focused row in the holdings list.
+    /// `nil` when the list is not focused. The arrow keys move this up and
+    /// down; `Enter` copies the row's ticker to the clipboard (matching
+    /// the Windows ListBox behaviour). Resets to `nil` whenever the visible
+    /// holdings change shape (tab switch, refresh that adds/drops rows).
+    @Published var selectedRowIndex: Int? = nil
     @Published var showOverlay = false
     @Published var overlayTitle = ""
     @Published var overlayBody = ""
@@ -175,6 +131,16 @@ class PortfolioViewModel: ObservableObject {
         holdingsViewModels = currentHoldings
             .sorted { abs($0.pnl) > abs($1.pnl) }
             .map(HoldingViewModel.init(holding:))
+        // A refresh can add or drop rows; the previous selection is now
+        // meaningless. Clamp to the new count, or nil it out if there
+        // are no rows left, so the arrow keys don't reach past the end.
+        if let i = selectedRowIndex {
+            if holdingsViewModels.isEmpty {
+                selectedRowIndex = nil
+            } else {
+                selectedRowIndex = min(i, holdingsViewModels.count - 1)
+            }
+        }
     }
 
     var invested: Decimal {
@@ -263,10 +229,25 @@ class PortfolioViewModel: ObservableObject {
             base = "at \(fmt.string(from: lastSync).lowercased())"
         }
 
+        // A failed fetch with a previous successful sync is "stale" rather
+        // than empty: the user has a portfolio on screen, but the next
+        // refresh did not land. Prefix the label so they know the data is
+        // not current -- matches the Windows "stale" sync label.
+        if errorMessage != nil {
+            return "stale  ·  \(base)"
+        }
         if usingStaleNavs {
             return "\(base)  ·  fund NAVs delayed"
         }
         return base
+    }
+
+    /// `true` when the most recent refresh failed and we still have stale data
+    /// on screen. Drives the amber "Cannot reach Kite" dot color in
+    /// `WidgetView`. A fresh launch with no portfolio yet is `false` -- the
+    /// connect overlay already conveys that state.
+    var isStale: Bool {
+        errorMessage != nil && portfolio != nil
     }
 
     /// The action is required, not optional. `overlayAction` was previously
@@ -304,4 +285,20 @@ class PortfolioViewModel: ObservableObject {
     }
 
     func hideOverlay() { showOverlay = false }
+
+    /// Throttles a manual refresh request to once per minute.
+    ///
+    /// Returns `true` when the throttle passed and the caller should fire a
+    /// fetch; `false` when the user hit the button too soon and the toast
+    /// should already be on screen. The Windows `RefreshAsync` has the
+    /// same 60-second cooldown; the toast text is identical to keep the
+    /// platforms consistent.
+    static let manualCooldown: TimeInterval = 60
+    /// Where the controller reads "is the user allowed to refresh right
+    /// now?" Returns `true` when enough time has passed since the last
+    /// manual sync, or no manual sync has happened yet.
+    func canRefreshManually(now: Date = Date()) -> Bool {
+        guard let last = lastManualSync else { return true }
+        return now.timeIntervalSince(last) >= Self.manualCooldown
+    }
 }
