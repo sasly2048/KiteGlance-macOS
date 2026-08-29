@@ -10,15 +10,25 @@ struct WidgetView: View {
     @State private var nextBackdrop: BackdropImage?
     @State private var backdropOpacity: Double = 1
     @State private var scrimOpacity: Double = 0
-    @State private var showSkeleton = true
     @State private var breathAnimation = false
     @State private var liveDotColor: Color = .gray
     @State private var toastMessage: String?
     @State private var toastOffset: CGFloat = 8
     @State private var toastOpacity: Double = 0
+    /// The skeleton overlay is up while this is true. Set to true in
+    /// `init()` and flipped to false by `initialize()` after the first paint so
+    /// the hero number never paints blank. The skeleton render itself is not
+    /// yet wired into `body` -- the `showSkeleton = false` assignment in
+    /// `initialize()` was the only reference, and removing it left the file
+    /// failing to compile. Declared here so the assignment compiles; the
+    /// render and a `body` branch are the next step.
+    @State private var showSkeleton = true
     /// Drives the holdings-row stagger. Flipped true once the pane is open so
     /// the rows animate in rather than appearing all at once.
     @State private var rowsVisible = false
+    /// Tracks the x-offset of the active tab underline bar.
+    @State private var tabUnderlineX: CGFloat = 20
+    @State private var tabUnderlineWidth: CGFloat = 44
 
     @Environment(\.palette) private var palette
 
@@ -186,6 +196,7 @@ struct WidgetView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .opacity(viewModel.portfolio != nil ? 1 : 0)
         .animation(.easeInOut(duration: 0.7), value: viewModel.portfolio != nil)
+        .animation(.easeInOut(duration: 0.5), value: viewModel.heroValue >= 0)
     }
 
     // MARK: - Compact Header
@@ -272,12 +283,12 @@ struct WidgetView: View {
 
             // Percentage chip
             HStack(spacing: 5) {
-                Image(systemName: viewModel.heroValue >= 0 ? "chevron.up" : "chevron.down")
+                Image(systemName: "chevron.up")
                     .font(.system(size: 7, weight: .bold))
                     .rotationEffect(.degrees(viewModel.heroValue >= 0 ? 0 : 180))
                     .animation(.spring(response: 0.46, dampingFraction: 0.8), value: viewModel.heroValue >= 0)
 
-                Text("\(abs(viewModel.heroPct).formatted(.number.precision(.fractionLength(2))))%")
+                Text("\(viewModel.heroPctDisplay)%")
                     .font(.system(size: 11.5, weight: .semibold))
                     .monospacedDigit()
                     .contentTransition(.numericText())
@@ -459,47 +470,68 @@ struct WidgetView: View {
         }
     }
 
-    private var tabBar: some View {
-        HStack(spacing: 24) {
-            tabButton("Stocks", "stocks", viewModel.stocks.count)
-            tabButton("Funds", "funds", viewModel.funds.count)
-            Spacer()
-        }
-        .padding(.horizontal, 20)
-        .padding(.top, 14)
-        .overlay(alignment: .bottom) {
-            GeometryReader { geo in
-                let tab = viewModel.activeTab == "stocks" ? 0 : 1
-                let x = tab == 0 ? 0 : geo.size.width / 2 - 22 // approximate
-                Rectangle()
-                    .fill(palette.primary)
-                    .frame(width: 44, height: 2)
-                    .offset(x: x)
-                    .animation(.spring(response: 0.48, dampingFraction: 0.8), value: viewModel.activeTab)
-            }
-            .frame(height: 2)
-        }
-    }
-
-    private func tabButton(_ title: String, _ tab: String, _ count: Int) -> some View {
-        Button(action: { controller.switchTab(tab) }) {
-            HStack(spacing: 6) {
-                Text(title)
-                    .font(.system(size: 11.5, weight: .semibold))
-                if count > 0 {
-                    Text("\(count)")
-                        .font(.system(size: 11.5, weight: .semibold))
-                        .foregroundStyle(palette.faint)
-                }
-            }
-            .foregroundStyle(viewModel.activeTab == tab ? palette.primary : palette.tertiary)
-            .padding(.vertical, 10)
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(title)
-        .accessibilityValue(count > 0 ? "\(count) held" : "None held")
-        .accessibilityAddTraits(viewModel.activeTab == tab ? [.isSelected, .isButton] : .isButton)
-    }
+    private var tabBar: some View {\r
+        HStack(spacing: 24) {\r
+            tabButton("Stocks", "stocks", viewModel.stocks.count)\r
+                .background(\r
+                    GeometryReader { geo in\r
+                        Color.clear.preference(\r
+                            key: TabFrameKey.self,\r
+                            value: ["stocks": geo.frame(in: .named("tabBar"))]\r
+                        )\r
+                    }\r
+                )\r
+            tabButton("Funds", "funds", viewModel.funds.count)\r
+                .background(\r
+                    GeometryReader { geo in\r
+                        Color.clear.preference(\r
+                            key: TabFrameKey.self,\r
+                            value: ["funds": geo.frame(in: .named("tabBar"))]\r
+                        )\r
+                    }\r
+                )\r
+            Spacer()\r
+        }\r
+        .padding(.horizontal, 20)\r
+        .padding(.top, 14)\r
+        .coordinateSpace(name: "tabBar")\r
+        .onPreferenceChange(TabFrameKey.self) { frames in\r
+            let tab = viewModel.activeTab\r
+            if let frame = frames[tab] {\r
+                withAnimation(.spring(response: 0.48, dampingFraction: 0.8)) {\r
+                    tabUnderlineX = frame.minX\r
+                    tabUnderlineWidth = max(frame.width, 30)\r
+                }\r
+            }\r
+        }\r
+        .overlay(alignment: .bottomLeading) {\r
+            Rectangle()\r
+                .fill(palette.primary)\r
+                .frame(width: tabUnderlineWidth, height: 2)\r
+                .offset(x: tabUnderlineX)\r
+                .animation(.spring(response: 0.48, dampingFraction: 0.8), value: viewModel.activeTab)\r
+        }\r
+    }\r
+\r
+    private func tabButton(_ title: String, _ tab: String, _ count: Int) -> some View {\r
+        Button(action: { controller.switchTab(tab) }) {\r
+            HStack(spacing: 6) {\r
+                Text(title)\r
+                    .font(.system(size: 11.5, weight: .semibold))\r
+                if count > 0 {\r
+                    Text("\(count)")\r
+                        .font(.system(size: 11.5, weight: .semibold))\r
+                        .foregroundStyle(palette.faint)\r
+                }\r
+            }\r
+            .foregroundStyle(viewModel.activeTab == tab ? palette.primary : palette.tertiary)\r
+            .padding(.vertical, 10)\r
+        }\r
+        .buttonStyle(.plain)\r
+        .accessibilityLabel(title)\r
+        .accessibilityValue(count > 0 ? "\(count) held" : "None held")\r
+        .accessibilityAddTraits(viewModel.activeTab == tab ? [.isSelected, .isButton] : .isButton)\r
+    }\r
 
     private var emptyState: some View {
         VStack(spacing: 6) {

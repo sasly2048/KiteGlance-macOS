@@ -107,3 +107,45 @@ final class PnlMathTests: XCTestCase {
         XCTAssertEqual(pnl, Decimal(string: "0.3")!)
     }
 }
+
+// MARK: - Rounding
+
+/// Parity check: the Windows `Math.Round(... AwayFromZero)` rounds half values
+/// up in absolute magnitude, which is what `MoneyRounding.halfAwayFromZero`
+/// here must match. A row showing 0.5 on the rupee total rendering as "₹0"
+/// on macOS but "₹1" on Windows would be a real (not cosmetic) divergence.
+final class MoneyRoundingTests: XCTestCase {
+
+    func testHalfRoundsAwayFromZeroForPositiveValues() {
+        XCTAssertEqual(MoneyRounding.halfAwayFromZero(0.5), 1)
+        XCTAssertEqual(MoneyRounding.halfAwayFromZero(1.5), 2)
+        XCTAssertEqual(MoneyRounding.halfAwayFromZero(2.5), 3)
+    }
+
+    func testHalfRoundsAwayFromZeroForNegativeValues() {
+        // AwayFromZero means: take the sign of the input, push the value
+        // *away* from zero by the half step. So -0.5 rounds to -1, not 0.
+        XCTAssertEqual(MoneyRounding.halfAwayFromZero(-0.5), -1)
+        XCTAssertEqual(MoneyRounding.halfAwayFromZero(-1.5), -2)
+        XCTAssertEqual(MoneyRounding.halfAwayFromZero(-2.5), -3)
+    }
+
+    /// Whole values are unchanged.
+    func testIntegersPassThrough() {
+        XCTAssertEqual(MoneyRounding.halfAwayFromZero(0), 0)
+        XCTAssertEqual(MoneyRounding.halfAwayFromZero(1), 1)
+        XCTAssertEqual(MoneyRounding.halfAwayFromZero(-1), -1)
+        XCTAssertEqual(MoneyRounding.halfAwayFromZero(1000.5), 1001)
+    }
+
+    /// Sanity: the helper is identifying the half boundary correctly so the
+    /// tests above exercise what they claim to.
+    func testIsExactlyHalfDetectsHalfValues() {
+        XCTAssertTrue(MoneyRounding.isExactlyHalf(0.5))
+        XCTAssertTrue(MoneyRounding.isExactlyHalf(-0.5))
+        XCTAssertTrue(MoneyRounding.isExactlyHalf(1.5))
+        XCTAssertFalse(MoneyRounding.isExactlyHalf(0.4))
+        XCTAssertFalse(MoneyRounding.isExactlyHalf(0.6))
+        XCTAssertFalse(MoneyRounding.isExactlyHalf(0))
+    }
+}

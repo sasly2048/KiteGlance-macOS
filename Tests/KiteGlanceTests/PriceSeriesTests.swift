@@ -143,3 +143,84 @@ final class PriceSeriesTests: XCTestCase {
         XCTAssertEqual(decoded["INFY"].points, [100, 105])
     }
 }
+
+// MARK: - Down-sampling and frozen series
+
+/// The intraday 5-minute feed is dense (~150 candles for two trading days)
+/// but the sparkline only has room for `PriceSeries.capacity` (= 40) points.
+/// Down-sampling compresses the source without biasing the start of the
+/// window; the frozen-set guard keeps per-refresh `last_price` from piling
+/// on the right edge of a 5-minute chart.
+final class IntradaySeriesTests: XCTestCase {
+
+    func testDownsamplePassesThroughWhenSourceIsAtOrBelowTarget() {
+        let source = [10.0, 20.0, 30.0]
+        XCTAssertEqual(PriceSeries.downsample(source, to: 5), source)
+    }
+
+    func testDownsampleReturnsExactlyTargetCountForDenseSource() {
+        let source = (0..<1000).map { Double($0) }
+        XCTAssertEqual(PriceSeries.downsample(source, to: 40).count, 40)
+    }
+
+    func testDownsamplePreservesFirstAndLast() {
+        // With 100 source points and 10 targets, slot 0 is index 5 (midpoint
+        // of 0..10) and slot 9 is index 95 (midpoint of 90..100). The first
+        // and last raw values would be 0 and 99; after midpoint pick, the
+        // first sampled is 5 and the last is 95. The endpoints drift inward
+        // by half a bucket -- the expected behaviour of midpoint-pick
+        // downsampling, and what makes the result symmetric.
+        let source = (0..<100).map { Double($0) }
+        let out = PriceSeries.downsample(source, to: 10)
+        XCTAssertEqual(out.first, 5)
+        XCTAssertEqual(out.last, 95)
+    }
+
+    func testDownsampleIsMonotonicForMonotonicSource() {
+        // A strictly increasing source stays strictly increasing after
+        // resampling -- no two output points should ever be equal.
+        let source = (0..<200).map { Double($0) }
+        let out = PriceSeries.downsample(source, to: 50)
+        for i in 1..<out.count {
+            XCTAssertGreaterThan(out[i], out[i - 1], "non-monotonic at \(i)")
+        }
+    }
+
+    /// A frozen series rejects new points from `record`. The intraday seed
+    /// path relies on this: a single `last_price` refresh would otherwise put a
+    /// 5-minute gap on the right edge of a 5-minute-candle chart.
+    func testFrozenSeriesRejectsFurtherRecord() {
+        var history = PriceHistory()
+        history.seedIntraday(symbol: "INFY", closes: [100, 101, 102, 103, 104])
+        XCTAssertTrue(history.frozen.contains("INFY"))
+
+        let before = history["INFY"].points
+        history.record(symbol: "INFY", price: 999)
+        let after = history["INFY"].points
+
+        XCTAssertEqual(before, after, "frozen series must not be appended to")
+    }
+
+    /// `prune(keeping:)` clears the frozen flag for symbols that are dropped,
+    /// so a sold and re-bought symbol doesn't keep its frozen status forever.
+    func testPruneClearsFrozenForDroppedSymbols() {
+        var history = PriceHistory()
+        history.seedIntraday(symbol: "INFY", closes: [100, 101, 102])
+        XCTAssertTrue(history.frozen.contains("INFY"))
+
+        history.prune(keeping: [])
+        XCTAssertFalse(history.frozen.contains("INFY"))
+    }
+
+    /// `seedIntraday` is a no-op on an empty source, so a transient AMFI
+    /// outage cannot poison the series.
+    func testSeedIntradayIgnoresEmptySource() {
+        var history = PriceHistory()
+        history.record(symbol: "INFY", price: 100)
+        history.record(symbol: "INFY", price: 101)
+
+        history.seedIntraday(symbol: "INFY", closes: [])
+        XCTAssertFalse(history.frozen.contains("INFY"))
+        XCTAssertEqual(history["INFY"].points, [100, 101])
+    }
+}

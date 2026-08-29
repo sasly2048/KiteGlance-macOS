@@ -14,14 +14,26 @@ struct Money {
         let absValue = abs(value)
         let sign = value < 0 ? minus : ""
 
+        // Cast to Double for the formatted rounding, then format with the
+        // desired precision. Casting back to Decimal after `rounded(...)` is
+        // not necessary because the formatter only reads the magnitude.
+        let d = absValue.doubleValue
+
         if absValue >= 10_000_000 {
-            return "\(sign)\(rs)\((absValue / 10_000_000).formatted(.number.precision(.fractionLength(2))))Cr"
+            let v = MoneyRounding.halfAwayFromZero(d / 10_000_000)
+            return "\(sign)\(rs)\(v.formatted(.number.precision(.fractionLength(2))))Cr"
         } else if absValue >= 100_000 {
-            return "\(sign)\(rs)\((absValue / 100_000).formatted(.number.precision(.fractionLength(2))))L"
+            let v = MoneyRounding.halfAwayFromZero(d / 100_000)
+            return "\(sign)\(rs)\(v.formatted(.number.precision(.fractionLength(2))))L"
         } else if absValue >= 1_000 {
-            return "\(sign)\(rs)\(absValue.formatted(.number.grouping(.automatic).precision(.fractionLength(0))))"
+            // The >= 1_000 path shows whole rupees. Round half up here too:
+            // a rupee total of 999.5 (the half-paisa rounding noise from Kite's
+            // pnl field) should show "₹1,000" on both platforms, not "₹1,000"
+            // here and "₹999" on Windows.
+            let v = MoneyRounding.halfAwayFromZero(d)
+            return "\(sign)\(rs)\(v.formatted(.number.grouping(.automatic).precision(.fractionLength(0))))"
         } else {
-            return "\(sign)\(rs)\(absValue.formatted(.number.precision(.fractionLength(2))))"
+            return "\(sign)\(rs)\(d.formatted(.number.precision(.fractionLength(2))))"
         }
     }
 
@@ -32,11 +44,13 @@ struct Money {
 
     static func percent(_ value: Decimal) -> String {
         let prefix = value >= 0 ? "+" : minus
-        return "\(prefix)\(abs(value).formatted(.number.precision(.fractionLength(2))))%"
+        let d = abs(value).doubleValue
+        return "\(prefix)\(MoneyRounding.halfAwayFromZero(d).formatted(.number.precision(.fractionLength(2))))%"
     }
 
     static func exact(_ value: Decimal) -> String {
-        "\(rs)\(value.formatted(.number.grouping(.automatic).precision(.fractionLength(2))))"
+        let d = value.doubleValue
+        return "\(rs)\(d.formatted(.number.grouping(.automatic).precision(.fractionLength(2))))"
     }
 
     /// Lives in KiteGlanceCore so it can be unit tested without AppKit.
@@ -81,7 +95,7 @@ struct HoldingViewModel: Identifiable, Equatable {
     var pnlPct: Decimal { PnlMath.pnlPct(pnl: pnl, invested: invested) }
 
     var pnlDisplay: String {
-        awaitingPrice ? "−−" : Money.signed(pnl)
+        awaitingPrice ? "--" : Money.signed(pnl)
     }
 
     var returnDisplay: String {
@@ -187,6 +201,16 @@ class PortfolioViewModel: ObservableObject {
 
     var heroLabel: String {
         activeTab == "funds" ? "Overall" : "Today"
+    }
+
+    /// Hero percentage rendered with AwayFromZero rounding to match Windows.
+    /// The bare `Decimal.formatted(...)` defaults to half-to-even, so a value
+    /// of 0.005% rounds to "0.00%" on macOS but "0.01%" on Windows. The
+    /// hero percent is a single character of disagreement per row per refresh
+    /// in the worst case, but `Money.percent` is already the canonical
+    /// formatter for these values -- use it here too.
+    var heroPctDisplay: String {
+        Money.percent(heroPct)
     }
 
     func heroColor(_ palette: Palette) -> Color {

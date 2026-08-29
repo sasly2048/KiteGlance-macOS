@@ -200,6 +200,44 @@ actor KiteService {
         }
     }
 
+    /// Intraday 5-minute candles for an instrument, oldest first.
+    ///
+    /// The minute endpoint is a separate subscription tier on Kite; an account
+    /// that has the daily endpoint may still get a 403 here. Tiers that don't
+    /// include minute data fall through to `historicalCloses` and then to the
+    /// local accumulator -- nothing changes for them. Kite caps the response at
+    /// 2000 records, so two trading days at 5-minute spacing (~150 candles) is
+    /// well under that.
+    func intradayCloses(instrumentToken: String, intervalMinutes: Int = 5, days: Int = 2) async throws -> [Double] {
+        await ensureCredentialsLoaded()
+
+        let end = Date()
+        // One trading day has ~75 five-minute candles. The endpoint caps at
+        // 2000, so two days gives ~150 with plenty of headroom for the next
+        // version of the API to raise the cap.
+        let start = Calendar(identifier: .gregorian).date(byAdding: .day, value: -days, to: end) ?? end
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        formatter.timeZone = TimeZone(identifier: "Asia/Kolkata")
+
+        let candles = try await request(
+            path: "/instruments/historical/\(instrumentToken)/minute",
+            method: "GET",
+            responseType: HistoricalCandles.self,
+            query: [
+                "interval": String(intervalMinutes),
+                "from": formatter.string(from: start),
+                "to": formatter.string(from: end)
+            ]
+        )
+
+        return candles.candles.compactMap { candle -> Double? in
+            guard candle.count > 4 else { return nil }
+            return candle[4].doubleValue
+        }
+    }
+
     // MARK: - HTTP
 
     private func request<T: Decodable>(

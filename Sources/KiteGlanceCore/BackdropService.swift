@@ -52,7 +52,17 @@ public struct BackdropService {
     /// Dawn 05-08, day 08-17, dusk 17-20, night 20-05. The boundaries follow the
     /// sky, not the market: the widget lives on the desktop all day, and its
     /// light should agree with the window next to it.
-    static func byHour(_ date: Date, calendar: Calendar = .current) -> BackdropImage {
+    ///
+    /// Uses an explicit Asia/Kolkata timezone rather than the caller's. The
+    /// widget is for an Indian NSE portfolio, and the comment above says the
+    /// hours track the Indian sky; reading them off the user's local clock
+    /// made a widget launched in UTC show noon at the wrong moment. The
+    /// previous version defaulted to `Calendar = .current`, which silently
+    /// picked up the system timezone and produced a chart that drifted east
+    /// or west of the actual sky depending on where the user happened to be.
+    static func byHour(_ date: Date) -> BackdropImage {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Kolkata")!
         switch calendar.component(.hour, from: date) {
         case 5..<7: .dawn
         case 7..<8: .sunrise
@@ -66,9 +76,12 @@ public struct BackdropService {
     }
 
     /// A steady walk through the set, one step every three hours, anchored to
-    /// the calendar so every launch on the same afternoon shows the same image --
-    /// rotation should feel like a slow clock, not a slot machine.
-    static func byRotation(_ date: Date, calendar: Calendar = .current) -> BackdropImage {
+    /// IST so a launch at 3pm in any timezone always shows the same image. The
+    /// rotation reads the IST hour rather than the system hour, matching
+    /// `byHour` above.
+    static func byRotation(_ date: Date) -> BackdropImage {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Kolkata")!
         let dayOfYear = calendar.ordinality(of: .day, in: .year, for: date) ?? 1
         let hour = calendar.component(.hour, from: date)
         let slot = (dayOfYear * 8 + hour / 3) % BackdropImage.allCases.count

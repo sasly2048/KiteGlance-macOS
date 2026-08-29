@@ -386,6 +386,21 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
                   await priceHistory.needsHistoricalSeed(symbol: holding.symbol) else { continue }
 
             do {
+                // Try the better-resolution endpoint first. A 403 (subscription
+                // tier doesn't include minute data) or any other failure is
+                // logged inside the call and surfaces as a thrown error, in
+                // which case we try daily, then stop -- the rest of the loop
+                // would also 403.
+                if let intraday = try? await kiteService.intradayCloses(
+                    instrumentToken: String(token),
+                    intervalMinutes: 5,
+                    days: 2
+                ) {
+                    let downsampled = PriceSeries.downsample(intraday, to: PriceSeries.capacity)
+                    await priceHistory.seedIntraday(symbol: holding.symbol, downsampledCloses: downsampled)
+                    continue
+                }
+
                 let closes = try await kiteService.historicalCloses(instrumentToken: String(token))
                 await priceHistory.seed(symbol: holding.symbol, closes: closes)
             } catch let error as KiteError where error.isSubscriptionFailure {

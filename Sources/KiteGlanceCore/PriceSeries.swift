@@ -70,14 +70,48 @@ public struct PriceSeries: Codable, Equatable, Sendable {
             )
         }
     }
+
+    /// Down-samples a dense series to at most `targetCount` points by picking
+    /// the midpoint of each evenly-sized bucket.
+    ///
+    /// The midpoint-pick (rather than first-of-bucket) is what keeps the
+    /// result symmetric around the middle of the source: a 1000-point source
+    /// mapped to 40 targets yields 12, 37, 62, ... rather than 0, 25, 50,
+    /// ..., which would bias the sparkline to the start of the window. A source
+    /// already at or below `targetCount` is returned as a copy.
+    public static func downsample(_ source: [Double], to targetCount: Int) -> [Double] {
+        if source.count <= targetCount { return source }
+        var out: [Double] = []
+        out.reserveCapacity(targetCount)
+        for i in 0..<targetCount {
+            // (i + 0.5) / targetCount * source.count centers the pick in
+            // each target bucket. Clamp on the off-by-one at the end.
+            let idx = min(Int((Double(i) + 0.5) / Double(targetCount) * Double(source.count)), source.count - 1)
+            out.append(source[idx])
+        }
+        return out
+    }
 }
 
 /// Every symbol's series, as persisted.
 public struct PriceHistory: Codable, Equatable, Sendable {
     public var series: [String: PriceSeries]
 
-    public init(series: [String: PriceSeries] = [:]) {
+    /// Symbols whose series was seeded from a dense historical feed (intraday
+    /// minute candles, down-sampled to fit the sparkline). `Record` will not
+    /// append to these: a single latest `last_price` would put a 5-minute
+    /// gap on the right edge of the chart, and the intraday shape is more
+    /// useful than a non-aligned point on top of it.
+    ///
+    /// Deliberately in-memory rather than persisted: every process start
+    /// re-runs the historical backfill once, and the local accumulator is
+    /// reset on the same path. Saving the frozen set would not survive the
+    /// next launch's price-history reload anyway.
+    public var frozen: Set<String> = []
+
+    public init(series: [String: PriceSeries] = [:], frozen: Set<String> = []) {
         self.series = series
+        self.frozen = frozen
     }
 
     public subscript(symbol: String) -> PriceSeries {
@@ -85,14 +119,32 @@ public struct PriceHistory: Codable, Equatable, Sendable {
     }
 
     public mutating func record(symbol: String, price: Double) {
+        // Frozen series do not accept new points. A single 5-minute-old
+        // last_price on a 5-minute-candle sparkline would put a visible cliff
+        // on the right edge; a local accumulator starts below the historical
+        // seed anyway, so the first per-refresh `record` after the seed
+        // would dominate and erase the down-sampled shape.
+        guard !frozen.contains(symbol) else { return }
         var existing = series[symbol] ?? PriceSeries()
         existing.append(price)
         series[symbol] = existing
+    }
+
+    /// Replaces a symbol's series with a down-sampled intraday feed and marks
+    /// it frozen. The caller is expected to have down-sampled `closes` to the
+    /// sparkline width already; this method does no further resampling.
+    public mutating func seedIntraday(symbol: String, closes: [Double]) {
+        guard !closes.isEmpty else { return }
+        var series = PriceSeries()
+        for close in closes { series.append(close) }
+        self.series[symbol] = series
+        frozen.insert(symbol)
     }
 
     /// Drops series for symbols no longer held, so a sold position does not keep
     /// its history on disk forever.
     public mutating func prune(keeping symbols: Set<String>) {
         series = series.filter { symbols.contains($0.key) }
+        frozen = frozen.intersection(symbols)
     }
 }

@@ -1,20 +1,23 @@
 # KiteGlance for macOS
 
-A native macOS desktop widget for your Zerodha portfolio — faithful recreation of the Windows [KiteGlance](https://github.com/sasly2048/KiteGlance) widget.
+A native macOS desktop widget for your Zerodha portfolio, tracking the Windows [KiteGlance](https://github.com/sasly2048/KiteGlance) project.
+
+This codebase aims for feature parity with the Windows build but is on a different release cadence — the Windows build carries several fixes (the KiteService tolerant-parse fix, the LoginServer cancellation-message fix, the OnStartup mutex guard, the audit pass, the re-audit pass, the third-party audit pass, the Windows `Key.Space` when-guard, and the intraday 5-minute sparklines from 1.5.0) that the macOS build picked up in the [Unreleased] section of `CHANGELOG.md`. The macOS build uses a Cocoa-native architecture (`NSWindow.Level` for desktop pinning, `NSHostingView` for SwiftUI, macOS Keychain for credential storage, `NWListener` for the loopback OAuth server) rather than a 1:1 port. The CHANGELOG lists what is and is not yet in the macOS build.
 
 ## Features
 
 - **Live portfolio P&L** — Overall and per-holding, split into Stocks and Funds tabs
 - **Accurate mutual-fund NAVs** — Overrides Kite's stale settlement NAVs with live NAVs from AMFI
 - **Desktop pinning** — Stays on desktop below all windows, above wallpaper (like a true widget)
-- **8 time-based backdrops** — Dawn, Sunrise, Morning, Noon, Dusk, Evening, Night, Midnight with smooth crossfades
+- **8 time-based backdrops** — Dawn, Sunrise, Morning, Noon, Dusk, Evening, Night, Midnight with smooth crossfades. Boundaries track the Indian sky (Asia/Kolkata), not the host timezone.
 - **Native macOS materials** — Vibrancy, blur, rounded corners, system shadows
 - **Spring animations** — Layout uses damped harmonic oscillator; numbers use quartic ease-out (no overshoot)
 - **Skeleton loading** — Zero-layout-shift skeleton screens
 - **Live indicator** — Pulsing dot during market hours (Mon–Fri 09:15–15:30 IST)
-- **Secure credentials** — Encrypted in macOS Keychain
+- **Secure credentials** — Encrypted in macOS Keychain; the Settings window deliberately does *not* echo the secret back when opened, and an empty Save means "keep the stored secret"
 - **OAuth loopback** — Captures redirect on `http://127.0.0.1:5173/callback`
 - **Auto-refresh** — Every 5 minutes during market hours
+- **Intraday sparklines** — Subscribed Kite accounts get 5-minute candles down-sampled to fit each row's chart; the resulting series is frozen so the per-refresh `last_price` does not pile a single non-aligned point on the right edge
 - **Keyboard shortcuts** — Space/Enter to expand, Esc to collapse, R to refresh, Tab to switch tabs
 - **Status bar menu** — Pin modes, backgrounds, settings, quit
 

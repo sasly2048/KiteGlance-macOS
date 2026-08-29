@@ -43,11 +43,16 @@ actor PriceHistoryService {
         guard !didLoad else { return }
         didLoad = true
 
-        guard let data = try? Data(contentsOf: fileURL),
-              let decoded = try? JSONDecoder().decode(PriceHistory.self, from: data) else {
-            return
+        guard let data = try? Data(contentsOf: fileURL) else { return }
+        do {
+            history = try JSONDecoder().decode(PriceHistory.self, from: data)
+        } catch {
+            // A sparkline is not worth a crash, but a half-written file that
+            // silently throws away the last few days of price points is worth
+            // a line in the log so "the sparkline is gone" has a cause. The
+            // Windows fix #29 added an equivalent warn for the same reason.
+            logger.warning("history.json unreadable (\(error.localizedDescription, privacy: .public)); sparklines will restart")
         }
-        history = decoded
     }
 
     /// Folds this refresh's prices in and persists the result.
@@ -111,6 +116,22 @@ actor PriceHistoryService {
         var series = PriceSeries()
         for close in closes { series.append(close) }
         history.series[symbol] = series
+        persist()
+    }
+
+    /// Seeds from a dense intraday feed. The caller is expected to have
+    /// down-sampled to the sparkline width; this method marks the symbol
+    /// frozen so per-refresh `record` calls do not pile a single non-aligned
+    /// `last_price` on the right edge of a 5-minute-candle chart.
+    ///
+    /// Mirrors the Windows `SeedIntraday`: replace the (possibly
+    /// locally-accumulated) series with the down-sampled feed and freeze it.
+    /// A first-time seed on a brand-new series skips the `record` step
+    /// because there is no pre-existing data to lose.
+    func seedIntraday(symbol: String, downsampledCloses: [Double]) {
+        loadIfNeeded()
+        guard !downsampledCloses.isEmpty else { return }
+        history.seedIntraday(symbol: symbol, closes: downsampledCloses)
         persist()
     }
 }

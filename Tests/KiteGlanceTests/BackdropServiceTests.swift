@@ -4,11 +4,15 @@ import XCTest
 /// Ported from tests/KiteGlance.Tests/BackdropServiceTests.cs.
 final class BackdropServiceTests: XCTestCase {
 
-    /// Fixed to UTC so the boundaries under test are the ones being asserted,
-    /// not the ones the build machine's time zone happens to produce.
+    /// IST, not UTC. The widget draws the Indian sky; the test mirrors the
+    /// production timezone so a date-constructed hour is what the runtime
+    /// reads off the same clock. Earlier revisions used UTC so the hour
+    /// boundaries under test were the ones being asserted, not the ones the
+    /// build machine's time zone happened to produce -- but that masked the
+    /// production bug where a non-IST system clock produced wrong backdrops.
     private var calendar: Calendar = {
         var cal = Calendar(identifier: .gregorian)
-        cal.timeZone = TimeZone(identifier: "UTC")!
+        cal.timeZone = TimeZone(identifier: "Asia/Kolkata")!
         return cal
     }()
 
@@ -29,14 +33,14 @@ final class BackdropServiceTests: XCTestCase {
         ]
 
         for (hour, expected) in expectations {
-            let actual = BackdropService.byHour(date(hour: hour), calendar: calendar)
+            let actual = BackdropService.byHour(date(hour: hour))
             XCTAssertEqual(actual, expected, "hour \(hour)")
         }
     }
 
     func testEveryHourResolvesToABackdrop() {
         for hour in 0..<24 {
-            _ = BackdropService.byHour(date(hour: hour), calendar: calendar)
+            _ = BackdropService.byHour(date(hour: hour))
         }
     }
 
@@ -57,14 +61,14 @@ final class BackdropServiceTests: XCTestCase {
     /// Rotation should feel like a slow clock: the same three-hour slot on the
     /// same day always yields the same image.
     func testRotationIsStableWithinAThreeHourSlot() {
-        let first = BackdropService.byRotation(date(hour: 12), calendar: calendar)
-        let second = BackdropService.byRotation(date(hour: 14), calendar: calendar)
+        let first = BackdropService.byRotation(date(hour: 12))
+        let second = BackdropService.byRotation(date(hour: 14))
         XCTAssertEqual(first, second)
     }
 
     func testRotationAdvancesToTheNextSlot() {
-        let slot = BackdropService.byRotation(date(hour: 12), calendar: calendar)
-        let next = BackdropService.byRotation(date(hour: 15), calendar: calendar)
+        let slot = BackdropService.byRotation(date(hour: 12))
+        let next = BackdropService.byRotation(date(hour: 15))
         XCTAssertNotEqual(slot, next)
     }
 
@@ -72,7 +76,7 @@ final class BackdropServiceTests: XCTestCase {
         var seen = Set<BackdropImage>()
         for day in 1...8 {
             for hour in stride(from: 0, to: 24, by: 3) {
-                seen.insert(BackdropService.byRotation(date(hour: hour, day: day), calendar: calendar))
+                seen.insert(BackdropService.byRotation(date(hour: hour, day: day)))
             }
         }
         XCTAssertEqual(seen.count, BackdropImage.allCases.count)

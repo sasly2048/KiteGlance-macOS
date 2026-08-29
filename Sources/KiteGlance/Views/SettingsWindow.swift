@@ -213,8 +213,7 @@ struct SettingsWindow: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(isSaving
-                    || apiKey.trimmingCharacters(in: .whitespaces).isEmpty
-                    || apiSecret.trimmingCharacters(in: .whitespaces).isEmpty)
+                    || apiKey.trimmingCharacters(in: .whitespaces).isEmpty)
 
                 Text("Encrypted with macOS Keychain. Stays on this device.")
                     .font(.system(size: 10.5))
@@ -233,8 +232,13 @@ struct SettingsWindow: View {
             refreshIntervalMinutes = initialRefreshIntervalMinutes
             themeMode = initialThemeMode
             if let creds = await CredentialVault().load() {
+                // Only the API key is echoed back; the secret is left blank so
+                // opening Settings does not put it on screen. An empty field on
+                // Save means "keep the stored secret". This matches the Windows
+                // behaviour introduced for the same reason: the secret is the
+                // half of the credentials that should never appear on screen
+                // unless the user is actively editing it.
                 apiKey = creds.apiKey
-                apiSecret = creds.apiSecret
             }
         }
         .onChange(of: refreshIntervalMinutes) { _, _ in
@@ -248,17 +252,33 @@ struct SettingsWindow: View {
 
     private func save() {
         let key = apiKey.trimmingCharacters(in: .whitespaces)
-        let secret = apiSecret.trimmingCharacters(in: .whitespaces)
+        let secretInput = apiSecret.trimmingCharacters(in: .whitespaces)
 
-        guard !key.isEmpty, !secret.isEmpty else {
-            errorMessage = "Both the API key and secret are required."
+        guard !key.isEmpty else {
+            errorMessage = "The API key is required."
             return
         }
 
         isSaving = true
-        Task {
+        Task { @MainActor in
             defer { isSaving = false }
             do {
+                // An empty secret field means "keep what is already stored":
+                // the Settings window deliberately does not echo the secret
+                // back when it opens. Without this branch, the first Save
+                // after a successful setup would silently wipe the secret.
+                let secret: String
+                if secretInput.isEmpty {
+                    let existing = try await CredentialVault().load()
+                    guard let existing else {
+                        errorMessage = "The API secret is required."
+                        return
+                    }
+                    secret = existing.apiSecret
+                } else {
+                    secret = secretInput
+                }
+
                 try await CredentialVault().save(
                     Credentials(apiKey: key, apiSecret: secret, accessToken: nil, savedAt: Date())
                 )

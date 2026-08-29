@@ -144,14 +144,11 @@ actor LoginServer {
         let status = query["status"]
 
         let body = Data(donePage.utf8)
-        let head = Data("""
-            HTTP/1.1 200 OK\r
-            Content-Type: text/html; charset=utf-8\r
-            Content-Length: \(body.count)\r
-            Connection: close\r
-            \r
-
-            """.utf8)
+        // Build the header as a plain array of bytes to avoid the multi-line
+        // string literal's CR+LF confusion (raw source line endings + escape
+        // sequences producing \r\r\n instead of the required \r\n).
+        let headerString = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
+        let head = Data(headerString.utf8)
 
         connection.send(content: head + body, completion: .contentProcessed { _ in
             connection.cancel()
