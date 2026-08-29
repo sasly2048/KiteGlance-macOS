@@ -15,13 +15,10 @@ struct WidgetView: View {
     @State private var toastMessage: String?
     @State private var toastOffset: CGFloat = 8
     @State private var toastOpacity: Double = 0
-    /// The skeleton overlay is up while this is true. Set to true in
-    /// `init()` and flipped to false by `initialize()` after the first paint so
-    /// the hero number never paints blank. The skeleton render itself is not
-    /// yet wired into `body` -- the `showSkeleton = false` assignment in
-    /// `initialize()` was the only reference, and removing it left the file
-    /// failing to compile. Declared here so the assignment compiles; the
-    /// render and a `body` branch are the next step.
+    /// The skeleton overlay is up while this is true. Set to true on first
+    /// launch and flipped to false by `initialize()` after a 300ms hold, so
+    /// the first paint reads as "loading" rather than a blank widget. The
+    /// skeleton view itself is rendered in `body` via `if showSkeleton`.
     @State private var showSkeleton = true
     /// Drives the holdings-row stagger. Flipped true once the pane is open so
     /// the rows animate in rather than appearing all at once.
@@ -44,6 +41,15 @@ struct WidgetView: View {
             grainOverlay
             topSheen
             accentWash
+
+            // Skeleton overlay while the first paint has not yet committed.
+            // Matches the Windows MainWindow.xaml `Bone` style: a faux hero
+            // number and two faux track rows that fade out in 340ms once
+            // `initialize()` has handed control back to the live layout.
+            if showSkeleton {
+                skeletonOverlay
+                    .transition(.opacity)
+            }
 
             VStack(spacing: 0) {
                 // Compact header
@@ -105,6 +111,17 @@ struct WidgetView: View {
                 withTransaction(instant) { rowsVisible = false }
             }
         }
+        // A failed refresh with data on screen: flip the live dot to amber so
+        // the user can see the portfolio is stale, not just be told in the
+        // sync label. Mirrors the Windows `MainWindow.LiveDot.Opacity` reset
+        // on error.
+        .onChange(of: viewModel.isStale) { _, isStale in
+            withAnimation(.easeInOut(duration: 0.32)) {
+                liveDotColor = isStale
+                    ? .orange
+                    : (viewModel.isMarketOpen ? .blue : palette.faint)
+            }
+        }
     }
 
     private var paneHeight: CGFloat {
@@ -124,9 +141,13 @@ struct WidgetView: View {
             .opacity(nextBackdrop == nil ? 1 : 1 - backdropOpacity)
 
         // Darkening scrim, applied only over user-supplied images. `scrimOpacity`
-        // was previously declared and never rendered.
+        // was previously declared and never rendered; the multiplier `* 0.35`
+        // here used to cap the scrim to 35% of the desired value, so a
+        // fully-on custom image was only 35% darkened -- the labels could
+        // still wash out. Match the Windows `BackdropScrim` crossfade:
+        // `scrimOpacity` 1.0 means full scrim, 0.0 means none.
         Color.black
-            .opacity(scrimOpacity * 0.35)
+            .opacity(scrimOpacity)
             .allowsHitTesting(false)
 
         // The eight backdrops are dark-tuned raster art. Light mode washes them
@@ -195,8 +216,23 @@ struct WidgetView: View {
         .frame(height: 150)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .opacity(viewModel.portfolio != nil ? 1 : 0)
-        .animation(.easeInOut(duration: 0.7), value: viewModel.portfolio != nil)
-        .animation(.easeInOut(duration: 0.5), value: viewModel.heroValue >= 0)
+        // Two consecutive `.animation` modifiers compose as "last wins"; the
+        // earlier duration of 0.7s on `portfolio != nil` was being dropped
+        // and only the 0.5s on `heroValue >= 0` applied. Merge the two
+        // triggers into a single tuple so both transitions run at the same
+        // duration the user actually sees.
+        .animation(.easeInOut(duration: 0.5), value: AnimationValues(
+            hasPortfolio: viewModel.portfolio != nil,
+            heroNonNegative: viewModel.heroValue >= 0
+        ))
+    }
+
+    /// Animatable pair for `accentWash`. Using a struct keeps SwiftUI's
+    /// `.animation(value:)` happy with a single Equatable token while still
+    /// responding to either input change.
+    private struct AnimationValues: Equatable {
+        let hasPortfolio: Bool
+        let heroNonNegative: Bool
     }
 
     // MARK: - Compact Header
@@ -546,6 +582,49 @@ struct WidgetView: View {
         .padding(.vertical, 60)
     }
 
+    // MARK: - Skeleton
+
+    /// Renders a faint placeholder layout while the first portfolio fetch
+    /// is in flight. Mirrors the Windows MainWindow.xaml `Bone` style:
+    /// a faux hero number, two faux track rows, that crossfade out in
+    /// 340ms once `initialize()` flips `showSkeleton` to `false`.
+    private var skeletonOverlay: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(palette.surface)
+                    .frame(width: 80, height: 12)
+                Spacer()
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(palette.surface)
+                    .frame(width: 48, height: 18)
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 16)
+
+            RoundedRectangle(cornerRadius: 6)
+                .fill(palette.surface)
+                .frame(width: 200, height: 36)
+                .padding(.horizontal, 20)
+                .padding(.top, 12)
+
+            HStack(spacing: 8) {
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(palette.surface)
+                    .frame(height: 8)
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(palette.surface)
+                    .frame(height: 8)
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 22)
+
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .allowsHitTesting(false)
+    }
+
     // MARK: - Overlay
 
     private var overlayView: some View {
@@ -648,8 +727,11 @@ struct WidgetView: View {
         currentBackdrop = BackdropService.pick(mode: controller.state.backdropMode)
         scrimOpacity = controller.state.backdropMode == .custom ? 1 : 0
 
-        // Start breathing animation if market open
-        if viewModel.isMarketOpen {
+        // Stale: amber dot (the "Cannot reach Kite" state). Closed: gray.
+        // Open: blue with a breath pulse.
+        if viewModel.isStale {
+            liveDotColor = .orange
+        } else if viewModel.isMarketOpen {
             startBreathing()
             liveDotColor = .blue
         } else {
@@ -657,7 +739,10 @@ struct WidgetView: View {
         }
 
         // Show skeleton initially
-        try? await Task.sleep(nanoseconds: 300_000_000)
+        // `.milliseconds` not `nanoseconds:` -- the nanoseconds parameter was
+        // deprecated in macOS 13 and the new form takes a typed Duration
+        // matching the rest of Swift's duration API.
+        try? await Task.sleep(for: .milliseconds(300))
         withAnimation(.easeOut(duration: 0.34)) {
             showSkeleton = false
         }

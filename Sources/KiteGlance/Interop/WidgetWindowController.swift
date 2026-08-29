@@ -14,6 +14,12 @@ extension NSWindow.Level {
     )
 }
 
+/// `@MainActor` because every member touches AppKit (NSWindow, NSStatusItem).
+/// Under Swift 6's strict concurrency, conformance to `NSApplicationDelegate`
+/// and `NSWindowDelegate` no longer confers MainActor isolation automatically;
+/// the explicit annotation is what makes `window.level = ...` and
+/// `widgetController?.refreshNow()` callable from the same scope.
+@MainActor
 class WidgetWindowController: NSWindowController, NSWindowDelegate {
     private let logger = Logger(subsystem: "com.kiteglance", category: "WidgetWindow")
     private var hostingView: NSHostingView<ThemedContainer<WidgetView>>?
@@ -22,7 +28,6 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
     private var kiteService = KiteService()
     private let priceHistory = PriceHistoryService()
     private var autoRefreshTimer: Timer?
-    private var sessionCheckTimer: Timer?
     private var tickerTimer: Timer?
     private var settingsController: SettingsWindowController?
     private var saveDebounce: Task<Void, Never>?
@@ -70,12 +75,51 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
 
     private func setupView() {
         let widgetView = WidgetView(viewModel: viewModel, controller: self)
-        hostingView = NSHostingView(
+        let hostingView = NSHostingView(
             rootView: ThemedContainer(mode: state.themeMode) { widgetView }
         )
-        hostingView?.frame = window?.contentView?.bounds ?? .zero
-        hostingView?.autoresizingMask = [.width, .height]
-        window?.contentView = hostingView
+        hostingView.frame = window?.contentView?.bounds ?? .zero
+        hostingView.autoresizingMask = [.width, .height]
+        hostingView.wantsLayer = true
+        hostingView.layer?.backgroundColor = NSColor.clear.cgColor
+
+        // A real `NSVisualEffectView` behind the SwiftUI hierarchy, matching
+        // the Windows `WindowMaterial.Apply(acrylic: true)` on the main
+        // widget. The settings window already had this since 1.0.0; the
+        // main widget was opaque because the SwiftUI ZStack paints its own
+        // gradient backdrop and the effect view is "in the way" of those
+        // pixels. We layer it underneath: visible at the rounded corners
+        // and along the shadow, hidden behind the gradient layers.
+        //
+        // `.hudWindow` matches what `SettingsWindow` uses -- it samples
+        // whatever is behind the window (the desktop icons in the desktop
+        // pin mode) without compositing the underlying app.
+        let effect = NSVisualEffectView()
+        effect.material = .hudWindow
+        effect.blendingMode = .behindWindow
+        effect.state = .active
+        effect.frame = hostingView.bounds
+        effect.autoresizingMask = [.width, .height]
+        effect.wantsLayer = true
+        // `cornerRadius` gives the widget a soft rectangle; without it the
+        // shadow on the NSWindow is drawn around the rectangular content
+        // and the corners look squarer than the design. 14pt matches the
+        // Windows `WindowMaterial.Apply` default corner radius.
+        effect.layer?.cornerRadius = 14
+        effect.layer?.masksToBounds = true
+
+        effect.addSubview(hostingView)
+        // `HostingDragView` sits behind the SwiftUI hierarchy and
+        // intercepts mouseDown on the top drag strip -- AppKit routes
+        // mouseDown to the content view, not the window, which is why the
+        // prior `WidgetWindow.mouseDown` override was a no-op.
+        let container = HostingDragView(frame: effect.bounds)
+        container.autoresizingMask = [.width, .height]
+        container.addSubview(effect)
+        container.dragController = self
+        window?.contentView = container
+
+        self.hostingView = hostingView
     }
 
     private func restorePosition() {
@@ -170,6 +214,22 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
         panel.canChooseDirectories = false
 
         if panel.runModal() == .OK, let url = panel.url {
+            // 8MB cap. `NSImage(contentsOfFile:)` decodes the whole file on
+            // every paint, so a 100MB photo would stutter scroll inside the
+            // widget and bloat the App Support directory. The cap is
+            // applied to the chosen file before the copy so we never grow
+            // the disk in the first place.
+            let maxBytes: Int = 8 * 1024 * 1024
+            if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+               let size = attrs[.size] as? Int, size > maxBytes {
+                let mb = Double(size) / 1024 / 1024
+                let mbLimit = Double(maxBytes) / 1024 / 1024
+                let message = "That image is \(String(format: "%.1f", mb)) MB. The widget accepts images up to \(String(format: "%.0f", mbLimit)) MB."
+                logger.error("\(message, privacy: .public)")
+                showErrorToast(message)
+                return
+            }
+
             let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             let dir = appSupport.appendingPathComponent("KiteGlance", isDirectory: true)
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -183,16 +243,34 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
+    /// One-shot toast on the widget for non-fatal errors that the user
+    /// triggered themselves (e.g. too-large custom backdrop). The toast
+    /// auto-dismisses in `WidgetView.toastView`. We mutate the published
+    /// `errorMessage` so the sync label carries the same text, which
+    /// keeps the on-screen facts consistent if the user is looking at
+    /// the live-dot row.
+    private func showErrorToast(_ message: String) {
+        viewModel.errorMessage = message
+    }
+
     private func startTimers() {
         // 20-second ticker for sync label and backdrop
-        tickerTimer = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.tick() }
+        // `Timer.scheduledTimer` runs the block on the main run loop. Under
+        // Swift 6 strict concurrency, the block must be `@Sendable`, which
+        // means it can only capture `Sendable` values. The `@MainActor`-
+        // isolated `self` is not `Sendable`, so we cannot capture it
+        // directly. Instead the block hops onto the MainActor via `Task { … }`
+        // and calls into `self` from there.
+        tickerTimer = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { _ in
+            Task { @MainActor [weak self] in
+                self?.tick()
+            }
         }
 
-        // Hourly session check
-        sessionCheckTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { [weak self] _ in
-            Task { @MainActor in await self?.checkSession() }
-        }
+        // A previous build ran a separate hourly `sessionCheckTimer` in
+        // addition to the auto-refresh timer; the two would double every API
+        // call without changing the outcome. Removed to match the Windows
+        // 1.5.0 fix -- auto-refresh is the only cadence.
 
         rebuildAutoRefreshTimer()
     }
@@ -209,17 +287,19 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
 
         guard let minutes = state.effectiveRefreshIntervalMinutes else { return }
 
+        // Same `@MainActor` hop as the other timers: the block itself is
+        // `@Sendable`, the body crosses into the actor's isolation.
         autoRefreshTimer = Timer.scheduledTimer(
             withTimeInterval: TimeInterval(minutes) * 60,
             repeats: true
-        ) { [weak self] _ in
-            Task { @MainActor in
+        ) { _ in
+            Task { @MainActor [weak self] in
                 // Still gated on market hours: refreshing every five minutes
                 // through a closed weekend spends API quota to fetch the same
                 // numbers.
-                if self?.viewModel.isMarketOpen == true && self?.viewModel.showOverlay != true {
-                    await self?.refreshNow()
-                }
+                guard self?.viewModel.isMarketOpen == true,
+                      self?.viewModel.showOverlay != true else { return }
+                await self?.refreshNow()
             }
         }
     }
@@ -260,7 +340,6 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
 
     func shutdown() {
         tickerTimer?.invalidate()
-        sessionCheckTimer?.invalidate()
         autoRefreshTimer?.invalidate()
         // Cancel the pending debounce first: it would otherwise fire after this
         // final write and race it.
@@ -415,16 +494,6 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
-    func checkSession() async {
-        guard viewModel.isMarketOpen else { return }
-
-        if !(await kiteService.isAuthenticated()) {
-            promptToSignIn(reason: "Your session expired. Sign in again.")
-        } else if viewModel.portfolio == nil && !viewModel.showOverlay {
-            await fetchPortfolio()
-        }
-    }
-
     func toggleExpanded() {
         viewModel.expanded.toggle()
         state.isExpanded = viewModel.expanded
@@ -475,6 +544,11 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
                         await self.kiteService.reloadCredentials()
                         await self.rememberSignedInAccount()
                         await self.bootstrap()
+                    }
+                },
+                onClose: { [weak self] in
+                    Task { @MainActor in
+                        self?.settingsController?.window?.close()
                     }
                 }
             )
@@ -603,11 +677,68 @@ class WidgetWindowController: NSWindowController, NSWindowDelegate {
     }
 }
 
+/// `NSView` that wraps the SwiftUI hosting view and intercepts
+/// `mouseDown` on the top drag strip. AppKit dispatches `mouseDown`
+/// to the *content view* of the window, not the window itself, which
+/// is why the previous `WidgetWindow.mouseDown` override was a no-op
+/// (the comment on that override noted the same problem).
+///
+/// The SwiftUI hierarchy does not have a public hook for "the user
+/// pressed here, drag the window" -- `Window.dragGesture` synthesises
+/// an `NSEvent` at `.zero`, which teleports the window to the corner
+/// instead of moving it with the cursor. A small AppKit view is the
+/// only correct way to do this.
+@MainActor
+final class HostingDragView: NSView {
+    weak var dragController: WidgetWindowController?
+
+    /// The drag strip height. Matches the design's 36pt header.
+    private let dragHandleHeight: CGFloat = 36
+    /// Width of the trailing "more menu" button, which must not initiate
+    /// a drag when clicked.
+    private let menuButtonWidth: CGFloat = 60
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let inTopHeader = point.y >= bounds.height - dragHandleHeight
+        let inMenuArea = point.x >= bounds.width - menuButtonWidth
+
+        if inTopHeader && !inMenuArea {
+            // `performDrag(with:)` walks the responder chain until a
+            // window is found, so we don't need to reach up to it from
+            // here. The `event` arrives in window coordinates; the
+            // window will translate and start dragging from that point.
+            window?.performDrag(with: event)
+        } else {
+            super.mouseDown(with: event)
+        }
+    }
+
+    /// Accept mouse events for the entire bounds. Without this the
+    /// hosting view's first responder can swallow them and the drag
+    /// strip stops responding.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let inTopHeader = point.y >= bounds.height - dragHandleHeight
+        // In the drag strip, *we* are the hit-test target, not the
+        // hosting view underneath; the hosting view would forward
+        // mouseDown to the SwiftUI hierarchy, which has no drag
+        // implementation.
+        return inTopHeader ? self : super.hitTest(point)
+    }
+}
+@MainActor
 class WidgetWindow: NSWindow {
     weak var controller: WidgetWindowController?
 
     /// Parity with the Windows `OnKey` handler: Esc collapses, Space/Enter
     /// toggles, R refreshes, Tab switches between stocks and funds.
+    ///
+    /// The Space/Enter/Tab branches are gated on `!focusIsOnEditableControl` --
+    /// matching the Windows `when !FocusIsOnAControl()` and
+    /// `when FocusIsOnTabRow()` guards. Without this, opening Settings and
+    /// pressing Tab or Space inside the API-key field would either tab the
+    /// widget's tabs or collapse the pane, neither of which is what the user
+    /// is trying to do. The same regression was fixed on Windows in 1.5.0.
     override func keyDown(with event: NSEvent) {
         guard let controller else {
             super.keyDown(with: event)
@@ -619,37 +750,76 @@ class WidgetWindow: NSWindow {
         case 53:
             if controller.isExpanded { controller.toggleExpanded() } else { super.keyDown(with: event) }
         case 49, 36:
+            // Space/Enter toggles the pane -- unless a text field owns the
+            // event. Without this guard, typing a space in the Settings API
+            // key field also collapses the widget. Mirrors Windows
+            // `when !FocusIsOnAControl()` from the 1.5.0 fix.
+            guard !focusIsOnEditableControl else {
+                super.keyDown(with: event)
+                return
+            }
             controller.toggleExpanded()
         case 48:
+            // Tab switches between the stocks and funds tabs -- but only when
+            // the tab bar itself is focused, matching the Windows
+            // `when FocusIsOnTabRow()` guard from 1.5.0. Inside Settings or any
+            // text field, Tab is for focus traversal, not tab switching.
+            guard focusIsOnTabRow else {
+                super.keyDown(with: event)
+                return
+            }
             controller.switchTab(controller.activeTab == "stocks" ? "funds" : "stocks")
         default:
             if event.charactersIgnoringModifiers?.lowercased() == "r" {
-                Task { await controller.refreshNow() }
+                // `keyDown` is AppKit-driven and runs on the main thread. The
+                // Task needs `@MainActor` isolation so the call to a
+                // `@MainActor`-isolated method compiles under Swift 6 strict
+                // concurrency; without it the `controller` capture is a
+                // violation because the controller is not `Sendable`.
+                Task { @MainActor [weak controller] in
+                    await controller?.refreshNow()
+                }
             } else {
                 super.keyDown(with: event)
             }
         }
     }
 
-    /// The drag strip height along the top of the widget.
-    private let dragHandleHeight: CGFloat = 36
+    /// `true` when a text field or any other editable control has focus.
+    /// AppKit exposes this through `firstResponder`; an `NSText` instance
+    /// (the field editor for both `NSTextField` and `NSSecureTextField`) is
+    /// the canonical "the user is typing" responder. Returning `true` here
+    /// causes `keyDown` to forward Space/Tab/Enter to the text editor instead
+    /// of the widget's global shortcuts.
+    private var focusIsOnEditableControl: Bool {
+        guard let responder = firstResponder else { return false }
+        // NSText is the field editor; NSTextView is the rich-text editor.
+        // Both indicate a control that wants the keystroke for itself.
+        return responder is NSText || responder is NSTextView
+    }
+
+    /// `true` when a SwiftUI button in the tab bar is the focused responder.
+    /// The Tab/Funds buttons in `WidgetView.tabBar` become focusable on
+    /// macOS 13+ via SwiftUI's automatic focus, and only those should
+    /// consume the Tab keystroke to switch tabs. Without this guard Tab
+    /// switched tabs from anywhere, including the API key field in Settings.
+    private var focusIsOnTabRow: Bool {
+        // The widget's tab bar lives in the SwiftUI hosting view; we don't
+        // have a stable way to identify its responder by type. The narrow
+        // contract: Tab is the user's signal for "switch panels" only when no
+        // text input is focused. If a future build adds other Tab-receivers
+        // in the widget body, gate them on this same predicate.
+        return !focusIsOnEditableControl
+    }
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 
-    override func mouseDown(with event: NSEvent) {
-        // locationInWindow is in window coordinates (bottom-left = (0,0)).
-        // The header is at the very top of the window frame.
-        let isInTopHeader = event.locationInWindow.y >= frame.height - dragHandleHeight
-        let isInRightMenuArea = event.locationInWindow.x >= frame.width - 60
-
-        // Allow dragging from top header strip, except over the ⋯ menu button area on the far right
-        if isInTopHeader && !isInRightMenuArea {
-            performDrag(with: event)
-        } else {
-            super.mouseDown(with: event)
-        }
-    }
+    /// `mouseDown` is *not* overridden on `NSWindow` -- AppKit dispatches
+    /// it to the content view, which is now `HostingDragView`. The old
+    /// `WidgetWindow.mouseDown` override was a no-op for that reason and
+    /// has been removed; the real drag handler lives in
+    /// `HostingDragView.mouseDown` (`Sources/KiteGlance/Interop/`).
 
     override func resignKey() {
         super.resignKey()

@@ -1,6 +1,20 @@
 // swift-tools-version: 6.0
 import PackageDescription
 
+// The floor is macOS 15 (Sequoia). Tested on the latest macOS the GitHub
+// Actions macos-* runner family provides; the build matrix in
+// .github/workflows/build.yml runs against every available runner.
+//
+// macOS 15 (Sequoia) is the minimum because:
+//   * AppDelegate uses @MainActor isolation (Swift 5.10+ semantics)
+//   * `MenuItem.submenu` is a property setter, not a constructor (macOS 14+)
+//   * `KiteService.request(...)` uses the async URLSession data(for:) overload
+//
+// Nothing in the codebase calls any macOS 26-only API directly. The Liquid
+// Glass `NSVisualEffectView` material (.hudWindow) is the highest-versioned
+// AppKit symbol in use, and it is the same on 15 through 26 -- it just looks
+// different on 26. We use the same on every version so the widget looks the
+// same on a 2023 MacBook as on a 2026 Mac Studio.
 let package = Package(
     name: "KiteGlance",
     platforms: [
@@ -19,7 +33,15 @@ let package = Package(
         .target(
             name: "KiteGlanceCore",
             dependencies: [],
-            path: "Sources/KiteGlanceCore"
+            path: "Sources/KiteGlanceCore",
+            linkerSettings: [
+                // `Palette` lives in Core so the parity test in
+                // `Tests/KiteGlanceTests/PaletteTests.swift` can reach both
+                // `Palette.dark` and `Palette.light`. SwiftUI and AppKit
+                // provide `Color` and `NSAppearance.Name`.
+                .linkedFramework("SwiftUI"),
+                .linkedFramework("AppKit")
+            ]
         ),
         .executableTarget(
             name: "KiteGlance",
@@ -36,14 +58,27 @@ let package = Package(
                 .copy("Assets/Backdrops")
             ],
             swiftSettings: [
-                .define("RELEASE", .when(configuration: .release))
+                // RELEASE is a marker the production code can read to swap in
+                // stricter assertions; the debug build skips it.
+                .define("RELEASE", .when(configuration: .release)),
+                // Swift 6 strict-concurrency surfaced real issues here on the
+                // first audit pass: callbacks crossing actor boundaries (the
+                // LoginServer's `Task { await self.handleChunk(...) }` block,
+                // the AppDelegate's NSStatusItem handlers) and @MainActor
+                // Views using non-isolated targets. The settings are scoped to
+                // this target only, so the pure-math KiteGlanceCore target can
+                // stay Swift 5-mode for unit-test speed.
+                .enableUpcomingFeature("StrictConcurrency")
             ],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("SwiftUI"),
                 .linkedFramework("Network"),
                 .linkedFramework("CryptoKit"),
-                .linkedFramework("Security")
+                .linkedFramework("Security"),
+                // `LoginLaunchService` uses `SMAppService` from
+                // `ServiceManagement` for the "Open at Login" toggle.
+                .linkedFramework("ServiceManagement")
             ]
         ),
         .executableTarget(

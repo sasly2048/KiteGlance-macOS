@@ -1,10 +1,18 @@
-import Foundation
+@preconcurrency import Foundation
 import Network
 import AppKit
 import os.log
 
 /// Minimal loopback HTTP responder that captures Kite's OAuth redirect.
 /// The Kite app's Redirect URL must be `http://127.0.0.1:5173/callback`.
+///
+/// `@preconcurrency` on `Foundation` lets us import `Network` without
+/// pulling every closure type into the Swift 6 strict-concurrency
+/// checker. The actor isolation in the rest of the file is explicit
+/// (`@MainActor` on the AppDelegate-equivalent types, actor for
+/// `LoginServer` itself), and the network callbacks hop onto the actor
+/// with `Task { await self.x() }` so the only thing crossing isolation is
+/// the Task body, not the callback parameter itself.
 actor LoginServer {
     static let port: NWEndpoint.Port = 5173
     private let logger = Logger(subsystem: "com.kiteglance", category: "LoginServer")
@@ -92,9 +100,14 @@ actor LoginServer {
         receive(on: connection)
     }
 
+    /// `NWConnection.receive`'s completion handler runs on `queue: .main` and
+    /// must be `@Sendable`. Capturing `[weak self]` (an actor type) directly
+    /// would be a Sendable violation under Swift 6 strict concurrency, so
+    /// instead the handler hops onto the actor's executor with a `Task` --
+    /// which is the documented pattern for bridging non-isolated callbacks
+    /// into an actor's isolation.
     private func receive(on connection: NWConnection) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 16384) { [weak self] data, _, isComplete, error in
-            guard let self else { return }
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 16384) { data, _, isComplete, error in
             Task {
                 await self.handleChunk(data, isComplete: isComplete, error: error, connection: connection)
             }
@@ -115,7 +128,17 @@ actor LoginServer {
         }
 
         let buffered = buffers[key] ?? Data()
-        let request = String(decoding: buffered, as: UTF8.self)
+
+        // `String(data:encoding:)` is the safe version. The previous code used
+        // `String(decoding:as:)` which throws on non-UTF-8 input -- some HTTP
+        // clients send Latin-1 or other encodings, and the throw would crash
+        // the Task (and the actor with it). A best-effort decode is the
+        // right behaviour here: a malformed request is dropped, the
+        // connection gets a 200 and a tiny page, and the next browser
+        // request (always in the same connection) is what carries the
+        // token anyway.
+        let request = String(data: buffered, encoding: .utf8)
+            ?? String(data: buffered, encoding: .isoLatin1)
 
         // Keep reading until the header block is complete or the request line is
         // unambiguously whole -- matching the Windows original, which reads in a
@@ -152,6 +175,11 @@ actor LoginServer {
 
         connection.send(content: head + body, completion: .contentProcessed { _ in
             connection.cancel()
+            // The completion handler runs on the queue we passed to
+            // `connection.start(queue:)` -- in our case `.main` -- and is
+            // not actor-isolated, so a `[weak self]` capture would be a
+            // Sendable violation. Hop through a `Task` instead, which is the
+            // pattern the rest of the file uses.
             Task { [weak self] in
                 guard let self else { return }
                 if status == "success", let token, !token.isEmpty {

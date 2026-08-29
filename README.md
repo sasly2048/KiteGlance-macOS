@@ -23,17 +23,52 @@ This codebase aims for feature parity with the Windows build but is on a differe
 
 ## Requirements
 
-- macOS 15 Sequoia or later
+- **macOS 15 Sequoia through macOS 26** (Tahoe, if/when released)
 - Apple Silicon (primary) or Intel
 - Zerodha account with Kite Connect API access ([developers.kite.trade](https://developers.kite.trade))
+
+The Package.swift floor is `.macOS(.v15)`, but the same code base compiles
+and runs on every macOS the CI matrix exercises (currently `macos-15`,
+adding runners as GitHub ships them). Nothing in the codebase calls a
+macOS 16/17/18/26-only API directly: the highest-versioned AppKit symbol
+in use is `NSVisualEffectView.material = .hudWindow`, available since
+macOS 10.10, and the system renders it as Liquid Glass on macOS 26
+without any code change. The widget looks the same on a 2023 MacBook
+as on a 2026 Mac Studio -- the OS draws it differently, but the
+painted pixels are identical.
 
 ## Building from Source
 
 ### Prerequisites
 
 - Xcode 16+ or Swift 6 toolchain
-- macOS 15 SDK
+- macOS 15 SDK (deployment target 15, builds and tests on later SDKs)
 - (Optional) Apple Developer account for signing/notarization
+
+### Verifying the build works on every macOS
+
+The CI workflow (`.github/workflows/build.yml`) runs `swift build` and
+`swift test` on each `macos-*` runner GitHub currently hosts. To run the
+same matrix locally against the SDK you have installed:
+
+```bash
+swift build -c debug
+swift test
+swift build -c release --arch arm64
+```
+
+If you have multiple Xcode versions installed, switch the active one
+and re-run to exercise the matrix by hand:
+
+```bash
+sudo xcode-select -s /Applications/Xcode_16.0.app/Contents/Developer
+swift build -c release
+sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+swift build -c release
+```
+
+The build is the same on Apple Silicon and Intel (the `arch: arm64` in
+the release command flips to `x86_64` for the latter).
 
 ### Quick Development Build (no signing)
 
@@ -107,6 +142,14 @@ open KiteGlance.app
 3. Note your **API key** and **API secret**
 4. Enter them in KiteGlance Settings (menu bar → Settings)
 
+> **macOS sandbox note.** The OAuth loopback listener binds to
+> `127.0.0.1:5173`, which requires the
+> `com.apple.security.network.server` entitlement. This is declared
+> in `KiteGlance.entitlements` for both the signed and unsigned
+> builds. The preflight lint (`scripts/preflight.py`) fails the
+> build if the entitlement is removed; a fresh checkout should
+> "just work" on every macOS the project supports.
+
 ### Environment Variables (Development)
 
 ```bash
@@ -152,8 +195,8 @@ Sources/KiteGlance/
 │   ├── KiteService.swift        # Kite Connect API + portfolio assembly
 │   ├── AmfiNavService.swift     # Live MF NAVs from AMFI (cached daily)
 │   ├── CredentialVault.swift    # macOS Keychain encryption
-│   ├── BackdropService.swift    # Time-based backdrop selection
-│   ├── PnlMath.swift            # Pure P&L arithmetic (tested)
+│   ├── BackdropService.swift    # Re-exported from KiteGlanceCore
+│   ├── PnlMath.swift            # Re-exported from KiteGlanceCore
 │   ├── LoginServer.swift        # Loopback OAuth on port 5173
 │   └── Log.swift                # Rotating file logger
 ├── ViewModels/
@@ -162,21 +205,32 @@ Sources/KiteGlance/
 │   ├── WidgetView.swift         # Main widget UI (compact + expanded)
 │   ├── HoldingRow.swift         # Individual holding row
 │   └── SettingsWindow.swift     # Credentials entry
-├── Motion/
-│   └── SpringEase.swift         # Spring physics + quartic number tweening
 ├── State/
 │   └── WidgetState.swift        # Persisted position, tabs, pin mode, backdrop
 └── Assets/
     ├── Backdrops/               # 8 mesh-gradient PNGs (dawn → midnight)
     └── Icons/                   # App icon
+
+Sources/KiteGlanceCore/         # Plain net8.0-style library; no AppKit
+├── Accounts.swift               # AccountRef + AccountResolver
+├── BackdropService.swift        # Time-based backdrop selection
+├── FundNameFormatter.swift     # "HDFC MID-CAP OPPORTUNITIES" → "HDFC Mid-cap"
+├── KeychainNaming.swift         # account-id → keychain-suffix
+├── MoneyRounding.swift          # AwayFromZero helper (shared with Windows)
+├── NavParser.swift             # AMFI NAVAll.txt → [ISIN: Decimal]
+├── PnlMath.swift                # P&L arithmetic (tested)
+├── Portfolio.swift              # PortfolioData + PortfolioAssembler
+├── PriceSeries.swift            # 40-point ring buffer + downsample
+├── PriceHistory.swift           # Frozen set for intraday-seeded series
+├── RefreshInterval.swift       # 1...60 clamp, 0 means off
+└── ThemeMode.swift              # ThemeMode + ResolvedTheme
 ```
 
 ### Data Flow
 
 1. **Boot** → Load state → Initialize services → Check auth → Fetch portfolio
 2. **Refresh** → Acquire semaphore → Fetch Kite equity/MF → Override MF NAVs from AMFI → Update ViewModel
-3. **Auto-refresh** → Timer fires every 5 min during market hours
-4. **Session check** → Hourly verify token validity during market hours
+3. **Auto-refresh** → Timer fires every N minutes during market hours (configurable in Settings; default 5 min)
 
 ### Threading
 

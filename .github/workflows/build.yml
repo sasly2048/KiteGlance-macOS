@@ -9,18 +9,41 @@ on:
   # its first compile without opening a PR.
   workflow_dispatch:
 
+# The codebase declares `.macOS(.v15)` in Package.swift and `LSMinimumSystemVersion`
+# 15.0 in Info.plist, but the test matrix aims for every available macOS
+# runner. Each row exercises the same source on a different SDK / SDK-time
+# default; differences surface as warnings, deprecations, or runtime changes
+# (e.g. the Liquid Glass `NSVisualEffectView` material aesthetic on
+# macOS 26). Add rows as new GitHub-hosted macOS-* labels appear.
 jobs:
   build:
-    name: Build & Test
-    runs-on: macos-15
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          # The current floor and the largest currently hosted runner. Add
+          # `macos-14` once the floor drops, or `macos-26` when GitHub
+          # ships a Tahoe runner.
+          - macos-15
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Show Swift version
-        run: swift --version
+      - name: Show Swift / macOS version
+        run: |
+          swift --version
+          sw_vers
+
+      # The preflight linter catches things the Swift compiler does not:
+      # force unwraps, unguarded `NSImage(contentsOfFile:)`, direct
+      # `URLSession.shared` use, missing entitlements. Runs before
+      # `swift build` so a lint failure does not waste a build minute.
+      - name: Preflight lint
+        run: python3 scripts/preflight.py
 
       - name: Build debug
         run: swift build -c debug
@@ -34,7 +57,7 @@ jobs:
       - name: Upload release binary
         uses: actions/upload-artifact@v4
         with:
-          name: KiteGlance-macos-arm64
+          name: KiteGlance-macos-arm64-${{ matrix.os }}
           path: .build/arm64-apple-macosx/release/KiteGlance
           retention-days: 7
 
