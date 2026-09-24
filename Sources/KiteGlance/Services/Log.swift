@@ -1,13 +1,10 @@
 import Foundation
 import os.log
+import KiteGlanceCore
 
-enum LogLevel: Int, Comparable {
-    case debug = 0, info = 1, warn = 2, error = 3
-
-    static func < (lhs: LogLevel, rhs: LogLevel) -> Bool {
-        lhs.rawValue < rhs.rawValue
-    }
-}
+/// `LogLevel` and the template renderer live in `KiteGlanceCore` so
+/// the test target can reach them. The actor here is the side-effecting
+/// sink: `os.log`, the rotating text file, and the optional JSONL file.
 
 actor Log {
     static let shared = Log()
@@ -34,6 +31,36 @@ actor Log {
         var msg = message
         if let error { msg += " :: \(error)" }
         log(.error, msg)
+    }
+
+    /// Structured entry. A free-form `messageTemplate` with `{Name}` holes
+    /// is rendered against the `properties` map. The rendered string goes
+    /// to the human-readable log; the structured record (template +
+    /// properties + level + timestamp) goes to the JSONL sink, which is
+    /// the right place to grep when a user reports a specific failure
+    /// mode. Mirrors the Windows `Log.WriteStructured` / `Log.Render`.
+    func structured(
+        _ level: LogLevel,
+        _ messageTemplate: String,
+        properties: [String: String] = [:]
+    ) {
+        let rendered = KiteGlanceCore.Log.render(template: messageTemplate, properties: properties)
+        log(level, rendered)
+
+        // JSONL is opt-in: enabling it in production means a sensitive
+        // properties map (e.g. account id) lands on disk on every line.
+        // Following the Windows `WriteStructured` opt-in via env var.
+        guard ProcessInfo.processInfo.environment["KITEGLANCE_STRUCTURED_LOG"] == "1" else { return }
+        let record = StructuredRecord(
+            timestamp: ISO8601DateFormatter().string(from: Date()),
+            level: String(describing: level),
+            template: messageTemplate,
+            properties: properties
+        )
+        if let data = try? JSONEncoder().encode(record),
+           let json = String(data: data, encoding: .utf8) {
+            Task { await fileLogger.writeStructured(json) }
+        }
     }
 
     private func log(_ level: LogLevel, _ message: String) {
@@ -92,4 +119,51 @@ actor FileLogger {
         try? FileManager.default.removeItem(at: backup)
         try FileManager.default.moveItem(at: url, to: backup)
     }
+
+    /// Appends a JSONL line. Same rotation policy as the human-readable
+    /// log, but a different file (`kiteglance.jsonl`) so the two can be
+    /// shipped and parsed independently. Opt-in: only written when
+    /// `KITEGLANCE_STRUCTURED_LOG=1` so a default install does not produce
+    /// the more verbose file.
+    func writeStructured(_ line: String) {
+        let jsonlURL = url.deletingLastPathComponent().appendingPathComponent("kiteglance.jsonl")
+        guard let data = (line + "\n").data(using: .utf8) else { return }
+
+        do {
+            try rotateIfNeeded(at: jsonlURL)
+
+            if !FileManager.default.fileExists(atPath: jsonlURL.path) {
+                try data.write(to: jsonlURL, options: .atomic)
+                return
+            }
+
+            let handle = try FileHandle(forWritingTo: jsonlURL)
+            defer { try? handle.close() }
+            try handle.seekToEnd()
+            try handle.write(contentsOf: data)
+        } catch {
+            // Silent: a logger that throws is worse than no logger.
+        }
+    }
+
+    private func rotateIfNeeded(at jsonlURL: URL) throws {
+        guard FileManager.default.fileExists(atPath: jsonlURL.path),
+              let attrs = try? FileManager.default.attributesOfItem(atPath: jsonlURL.path),
+              let size = attrs[.size] as? Int64, size >= maxBytes else { return }
+
+        let backup = jsonlURL.deletingPathExtension().appendingPathExtension("jsonl.1")
+        try? FileManager.default.removeItem(at: backup)
+        try FileManager.default.moveItem(at: jsonlURL, to: backup)
+    }
+}
+
+/// JSONL record. `properties` is intentionally `[String: String]`: a
+/// strongly-typed schema would require a code change every time a new
+/// log site was added, which is the opposite of the point of structured
+/// logging.
+struct StructuredRecord: Codable {
+    let timestamp: String
+    let level: String
+    let template: String
+    let properties: [String: String]
 }

@@ -9,6 +9,12 @@ actor KiteService {
     private var credentialVault = CredentialVault()
     private let amfiNav = AmfiNavService()
     private let logger = Logger(subsystem: "com.kiteglance", category: "KiteService")
+    /// HTTP session. Injected so the test target can swap in a
+    /// `URLProtocol`-mocked session; the production initialiser leaves it
+    /// as `URLSession.shared`. Made `@unchecked Sendable` because
+    /// `URLSession` itself is thread-safe; the actor isolation on
+    /// `KiteService` is what guards the actual reads/writes.
+    private let session: @unchecked Sendable URLSession
 
     private var apiKey: String = ""
     private var accessToken: String?
@@ -16,6 +22,20 @@ actor KiteService {
     private let refreshGate = AsyncSemaphore(value: 1)
 
     private(set) var usingStaleFundNavs = false
+
+    /// Production initialiser. The session defaults to `URLSession.shared`,
+    /// which is what every call site used before the test seam landed.
+    convenience init() {
+        self.init(session: .shared)
+    }
+
+    /// Test-friendly initialiser. The `URLSession` is captured and used
+    /// for every outbound request; tests pass a session whose
+    /// `configuration.protocolClasses` includes a `URLProtocol` subclass
+    /// that returns canned responses.
+    init(session: URLSession) {
+        self.session = session
+    }
 
     /// Credentials load lazily on first use rather than in `init`. A
     /// fire-and-forget `Task` in the initializer races every caller: whoever
@@ -114,7 +134,7 @@ actor KiteService {
     }
 
     func getPortfolio() async throws -> PortfolioData {
-        await refreshGate.wait()
+        try await refreshGate.wait()
         defer { refreshGate.signalFromDefer() }
 
         await ensureCredentialsLoaded()
@@ -143,7 +163,17 @@ actor KiteService {
         } catch let error as KiteError where error.isAuthFailure {
             throw error
         } catch {
+            // Structured record (opt-in via KITEGLANCE_STRUCTURED_LOG=1)
+            // alongside the `os.log` line, so the same fact surfaces in
+            // both sinks without duplicating the message text. The
+            // `{Error}` hole is filled by the renderer; absent properties
+            // stay as the literal `{Name}` so a missing value is visible.
             logger.warning("MF holdings fetch failed (\(error.localizedDescription, privacy: .public)); showing equity only")
+            await Log.shared.structured(
+                .warn,
+                "MF holdings fetch failed ({Error}); showing equity only",
+                properties: ["Error": error.localizedDescription]
+            )
         }
 
         // Kite's /mf/holdings last_price is a stale settlement NAV -- verified
@@ -247,6 +277,7 @@ actor KiteService {
         extraHeaders: [String: String] = [:],
         query: [String: String] = [:]
     ) async throws -> T {
+        try Task.checkCancellation()
         guard let token = accessToken, !apiKey.isEmpty else {
             throw KiteError("Not authenticated")
         }
@@ -264,7 +295,8 @@ actor KiteService {
         urlRequest.setValue("token \(apiKey):\(token)", forHTTPHeaderField: "Authorization")
         for (k, v) in extraHeaders { urlRequest.setValue(v, forHTTPHeaderField: k) }
 
-        let (data, response) = try await URLSession.shared.data(for: urlRequest)
+        let (data, response) = try await session.data(for: urlRequest)
+        try Task.checkCancellation()
         guard let http = response as? HTTPURLResponse else {
             throw KiteError("Invalid response")
         }
@@ -273,21 +305,32 @@ actor KiteService {
 
         if http.statusCode == 401 || http.statusCode == 403 {
             let payload = try? JSONDecoder().decode(KiteEnvelope.self, from: data)
+            // A 401 with `TokenException` is the only true auth failure: the
+            // session is gone and a re-login is the only remedy. A 401 with
+            // any other `error_type` -- most commonly `NetworkException` --
+            // is a transient blip and must NOT clear the stored token or
+            // surface a sign-in prompt. A 403 with `PermissionException` is
+            // the historical-data subscription case: the session is fine,
+            // the account just does not pay for this endpoint.
             if payload?.error_type == "TokenException" {
                 accessToken = nil
                 try? await credentialVault.clearAccessToken()
                 throw KiteError(payload?.message ?? "Session expired", isAuthFailure: true)
             }
-            // A valid session asking for an endpoint the account does not pay
-            // for -- historical data, chiefly. Signing in again would not help,
-            // so this must not be reported as an auth failure.
             if payload?.error_type == "PermissionException" {
                 throw KiteError(
                     payload?.message ?? "Not subscribed",
                     isSubscriptionFailure: true
                 )
             }
-            throw KiteError(payload?.message ?? "Not authorized", isAuthFailure: true)
+            // 401 without a recognised error_type is still a real auth
+            // failure (some Kite deployments omit the type on the
+            // session-expired response). 403 without one is not, so the
+            // fallback error is generic.
+            if http.statusCode == 401 {
+                throw KiteError(payload?.message ?? "Session expired", isAuthFailure: true)
+            }
+            throw KiteError(payload?.message ?? "Not authorized")
         }
 
         guard (200...299).contains(http.statusCode) else {
@@ -305,6 +348,7 @@ actor KiteService {
     /// The token-minting call. Unlike every other endpoint it authenticates with
     /// a checksum instead of a bearer token.
     private func sessionRequest(path: String, body: [String: String]) async throws -> TokenResponse {
+        try Task.checkCancellation()
         var urlRequest = URLRequest(url: baseURL.appendingPathComponent(path))
         urlRequest.httpMethod = "POST"
         urlRequest.setValue("3", forHTTPHeaderField: "X-Kite-Version")
@@ -314,11 +358,17 @@ actor KiteService {
         components.queryItems = body.map { URLQueryItem(name: $0.key, value: $0.value) }
         urlRequest.httpBody = components.percentEncodedQuery?.data(using: .utf8)
 
-        let (data, response) = try await URLSession.shared.data(for: urlRequest)
+        let (data, response) = try await session.data(for: urlRequest)
+        try Task.checkCancellation()
         guard let http = response as? HTTPURLResponse else {
             throw KiteError("Invalid response")
         }
 
+        // Tolerant parse: a 502 from an upstream proxy arrives as HTML and
+        // would otherwise throw a `DecodingError` rather than the
+        // user-actionable "Login failed (502)". Same approach the rest of
+        // `request(...)` uses for non-2xx bodies -- a malformed body becomes
+        // nil, and the status code is the truthful report.
         let decoded = try? JSONDecoder().decode(TokenResponse.self, from: data)
         guard (200...299).contains(http.statusCode) else {
             throw KiteError(decoded?.message ?? "Login failed (\(http.statusCode))")
@@ -456,50 +506,4 @@ struct KiteError: LocalizedError {
     }
 
     var errorDescription: String? { message }
-}
-
-/// A one-permit gate so two refreshes never overlap. Cancellation-aware: a
-/// cancelled waiter must not leave its continuation orphaned, which would close
-/// the gate permanently and freeze every later refresh.
-actor AsyncSemaphore {
-    private var value: Int
-    private var waiters: [UUID: CheckedContinuation<Void, Error>] = [:]
-
-    init(value: Int) { self.value = value }
-
-    func wait() async {
-        if value > 0 {
-            value -= 1
-            return
-        }
-
-        let id = UUID()
-        try? await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                waiters[id] = continuation
-            }
-        } onCancel: {
-            Task { await self.cancelWaiter(id) }
-        }
-    }
-
-    private func cancelWaiter(_ id: UUID) {
-        if let continuation = waiters.removeValue(forKey: id) {
-            continuation.resume(throwing: CancellationError())
-        }
-    }
-
-    func signal() {
-        if let entry = waiters.first {
-            waiters.removeValue(forKey: entry.key)
-            entry.value.resume()
-        } else {
-            value += 1
-        }
-    }
-
-    /// `defer` cannot `await`, so the gate is released via a detached hop.
-    nonisolated func signalFromDefer() {
-        Task { await signal() }
-    }
 }

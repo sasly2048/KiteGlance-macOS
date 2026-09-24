@@ -1,0 +1,24 @@
+# KiteGlance code ownership.
+#
+# The default owner is the maintainer; specific paths that benefit
+# from a focused reviewer (security, build infra) are listed below.
+
+* @sasly2048
+
+# Security-sensitive code: the credential vault, the network layer,
+# and anything that touches Keychain or HTTPS authentication.
+# Require a second pair of eyes on changes here.
+/Sources/KiteGlance/Services/CredentialVault.swift @sasly2048
+/Sources/KiteGlance/Services/KiteService.swift @sasly2048
+/Sources/KiteGlance/Services/LoginServer.swift @sasly2048
+/Sources/KiteGlance/Services/LoginLaunchService.swift @sasly2048
+/Sources/KiteGlance/Services/AmfiNavService.swift @sasly2048
+/Sources/KiteGlance/Interop/WidgetWindowController.swift @sasly2048
+/Sources/KiteGlance/State/WidgetState.swift @sasly2048
+/Sources/KiteGlanceCore/Accounts.swift @sasly2048
+/Sources/KiteGlanceCore/SecretMerge.swift @sasly2048
+
+# Build infrastructure and the release pipeline.
+/Package.swift @sasly2048
+/scripts/ @sasly2048
+/.github/ @sasly2048

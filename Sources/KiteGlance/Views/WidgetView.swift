@@ -326,7 +326,7 @@ struct WidgetView: View {
                     .rotationEffect(.degrees(viewModel.heroValue >= 0 ? 0 : 180))
                     .animation(.spring(response: 0.46, dampingFraction: 0.8), value: viewModel.heroValue >= 0)
 
-                Text("\(viewModel.heroPctDisplay)%")
+                Text(viewModel.heroPctDisplay) // already includes % (Money.percent)
                     .font(.system(size: 11.5, weight: .semibold))
                     .monospacedDigit()
                     .contentTransition(.numericText())

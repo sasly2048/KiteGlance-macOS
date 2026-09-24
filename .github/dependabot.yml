@@ -1,0 +1,29 @@
+# GitHub-native dependency updates.
+#
+# KiteGlance has no external SwiftPM dependencies (see
+# `Package.swift` `dependencies: []`), so there is nothing to update
+# in the dependency graph. Dependabot is left enabled for `github-actions`
+# and `swift` so the runner-images and any future Swift toolchain
+# bumps are caught automatically.
+
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/.github/workflows"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+
+  - package-ecosystem: "swift"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+    # The repo has no third-party SwiftPM packages, so this section
+    # is effectively a no-op until one is added. It is here so the
+    # reminder is the workflow, not the developer.

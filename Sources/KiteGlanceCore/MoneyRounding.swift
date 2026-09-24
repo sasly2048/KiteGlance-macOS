@@ -13,6 +13,15 @@ public enum MoneyRounding {
         value.rounded(.toNearestOrAwayFromZero)
     }
 
+    /// Round half values away from zero at `places` decimal places.
+    /// `halfAwayFromZero(12.345, places: 2)` -> 12.35. Callers that then
+    /// format to fixed fractional precision (percent, Cr/L) need this:
+    /// rounding to a whole number first throws away the digits they print.
+    public static func halfAwayFromZero(_ value: Double, places: Int) -> Double {
+        let factor = pow(10.0, Double(places))
+        return (value * factor).rounded(.toNearestOrAwayFromZero) / factor
+    }
+
     /// True when the given Decimal is exactly a half value (`.5`) at the
     /// resolution of a `Double`. Used by tests to assert that the round-trip
     /// through `formatted` keeps the parity with Windows.

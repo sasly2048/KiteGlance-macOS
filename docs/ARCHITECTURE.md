@@ -280,16 +280,25 @@ Ticker fires (20s)
 
 ## Testing Strategy
 
-- **Unit**: `PnlMath`, `BackdropService`, `Money` (pure functions)
-- **Integration**: `KiteService` with `URLProtocol` mock
-- **Actor isolation**: Verify no main-thread blocking
-- **Memory**: `leaks` tool on debug build
-- **UI**: Manual verification (SwiftUI testing limited)
+- **Unit**: `PnlMath`, `BackdropService`, `Money`, `AccountResolver`,
+  `NavParser`, `PriceSeries`, `SecretMerge`, `Log.render` (all in
+  `KiteGlanceCore`).
+- **Integration**: `KiteService` with `URLProtocol` mock (not yet
+  shipped — would require a `URLSession` shim in the actor).
+- **Actor isolation**: Verify no main-thread blocking.
+- **Memory**: `leaks` tool on debug build.
+- **UI**: Manual verification (SwiftUI testing limited). The end-to-end
+  checklist lives in `docs/TESTING.md`.
+- **Theme parity**: `PaletteTests.testDarkAndLightDefineTheSameKeys`
+  catches any field defined in one palette but not the other.
 
 ## Future Considerations
 
-- WidgetKit extension for Notification Center (read-only)
-- Sparkline charts per holding (Canvas + spring animation)
-- Multi-account support (tab bar in settings)
-- Keyboard shortcut customization
-- AppleScript/Shortcuts integration
+- WidgetKit extension for Notification Center (read-only).
+- Sparkline charts per holding (Canvas + spring animation). The
+  per-holding sparkline already exists; this is about graduating it
+  from `Path` to a `Canvas` for finer control over axis labels.
+- Multi-account support (tab bar in settings). Per-account Keychain
+  scoping already works; what is missing is a UI to manage them.
+- Keyboard shortcut customization.
+- AppleScript/Shortcuts integration.

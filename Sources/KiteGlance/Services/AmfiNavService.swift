@@ -5,6 +5,10 @@ import os.log
 actor AmfiNavService {
     private let url = URL(string: "https://www.amfiindia.com/spages/NAVAll.txt")!
     private let logger = Logger(subsystem: "com.kiteglance", category: "AmfiNavService")
+    /// HTTP session. Injected so the test target can swap in a
+    /// `URLProtocol`-mocked session; the production initialiser leaves
+    /// it as `URLSession.shared`.
+    private let session: URLSession
 
     private var cache: [String: Decimal]?
     private var cachedOn: Date?
@@ -17,6 +21,14 @@ actor AmfiNavService {
         let dir = appSupport.appendingPathComponent("KiteGlance", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent(cacheFileName)
+    }
+
+    convenience init() {
+        self.init(session: .shared)
+    }
+
+    init(session: URLSession) {
+        self.session = session
     }
 
     func getNav(for isin: String) async -> Decimal? {
@@ -54,7 +66,7 @@ actor AmfiNavService {
             request.setValue("KiteGlance/1.0", forHTTPHeaderField: "User-Agent")
             request.timeoutInterval = 20
 
-            let (data, _) = try await URLSession.shared.data(for: request)
+            let (data, _) = try await session.data(for: request)
             guard let text = String(data: data, encoding: .utf8) else { throw URLError(.cannotDecodeRawData) }
 
             let parsed = parseNavs(text)
@@ -65,6 +77,11 @@ actor AmfiNavService {
             return parsed
         } catch {
             logger.warning("AMFI fetch failed: \(error.localizedDescription, privacy: .public)")
+            await Log.shared.structured(
+                .warn,
+                "AMFI fetch failed ({Error}); falling back to disk cache",
+                properties: ["Error": error.localizedDescription]
+            )
 
             // Network failed. A day-old NAV still beats Kite's holdings-endpoint
             // NAV, so prefer a stale disk cache over nothing. But this data is
