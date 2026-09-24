@@ -211,7 +211,9 @@ class PortfolioViewModel: ObservableObject {
         guard let weekday = components.weekday, weekday != 1 && weekday != 7 else { return false }
         guard let hour = components.hour, let minute = components.minute else { return false }
         let minutes = hour * 60 + minute
-        return minutes >= 9*60 + 15 && minutes <= 15*60 + 30
+        // Session is [09:15, 15:30): the close is AT 15:30:00, so the 15:30
+        // minute is closed (was `<= 15*60 + 30`, a one-minute over-count).
+        return minutes >= 9*60 + 15 && minutes < 15*60 + 30
     }
 
     var syncLabel: String {
