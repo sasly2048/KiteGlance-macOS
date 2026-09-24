@@ -53,7 +53,7 @@ enum LoginLaunchService {
                 // back the actual state, not the requested one.
                 logger.error("Failed to set launch-at-login: \(error.localizedDescription, privacy: .public)")
                 Task {
-                    await Log.shared.structured(
+                    await AppLog.shared.structured(
                         .error,
                         "Failed to set launch-at-login: {Error}",
                         properties: ["Error": error.localizedDescription]

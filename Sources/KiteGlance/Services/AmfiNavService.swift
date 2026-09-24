@@ -77,7 +77,7 @@ actor AmfiNavService {
             return parsed
         } catch {
             logger.warning("AMFI fetch failed: \(error.localizedDescription, privacy: .public)")
-            await Log.shared.structured(
+            await AppLog.shared.structured(
                 .warn,
                 "AMFI fetch failed ({Error}); falling back to disk cache",
                 properties: ["Error": error.localizedDescription]

@@ -169,7 +169,7 @@ actor KiteService {
             // `{Error}` hole is filled by the renderer; absent properties
             // stay as the literal `{Name}` so a missing value is visible.
             logger.warning("MF holdings fetch failed (\(error.localizedDescription, privacy: .public)); showing equity only")
-            await Log.shared.structured(
+            await AppLog.shared.structured(
                 .warn,
                 "MF holdings fetch failed ({Error}); showing equity only",
                 properties: ["Error": error.localizedDescription]

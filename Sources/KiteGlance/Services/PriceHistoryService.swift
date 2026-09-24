@@ -53,7 +53,7 @@ actor PriceHistoryService {
             // Windows fix #29 added an equivalent warn for the same reason.
             logger.warning("history.json unreadable (\(error.localizedDescription, privacy: .public)); sparklines will restart")
             Task {
-                await Log.shared.structured(
+                await AppLog.shared.structured(
                     .warn,
                     "history.json unreadable ({Error}); sparklines will restart",
                     properties: ["Error": error.localizedDescription]

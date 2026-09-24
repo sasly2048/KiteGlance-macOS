@@ -124,6 +124,15 @@ struct WidgetView: View {
                     : (viewModel.isMarketOpen ? .blue : palette.faint)
             }
         }
+        // Toast text pushed from the window controller (manual-refresh throttle,
+        // copy confirmation). Route it through the local showToast() animation
+        // and clear the channel so the same message can fire again later.
+        .onChange(of: viewModel.toastMessage) { _, message in
+            if let message {
+                showToast(message)
+                viewModel.toastMessage = nil
+            }
+        }
     }
 
     private var paneHeight: CGFloat {

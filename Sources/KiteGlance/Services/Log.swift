@@ -6,8 +6,8 @@ import KiteGlanceCore
 /// the test target can reach them. The actor here is the side-effecting
 /// sink: `os.log`, the rotating text file, and the optional JSONL file.
 
-actor Log {
-    static let shared = Log()
+actor AppLog {
+    static let shared = AppLog()
 
     private let logger = Logger(subsystem: "com.kiteglance", category: "general")
     private let fileLogger: FileLogger

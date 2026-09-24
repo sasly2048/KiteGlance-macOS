@@ -97,6 +97,12 @@ class PortfolioViewModel: ObservableObject {
     /// holdings change shape (tab switch, refresh that adds/drops rows).
     @Published var selectedRowIndex: Int? = nil
     @Published var showOverlay = false
+    /// One-shot toast text pushed by the window controller (manual-refresh
+    /// throttle notice, "Copied SYMBOL"). WidgetView observes this and clears
+    /// it back to nil after showing. Previously the controller wrote to a
+    /// `toastMessage` that only existed as WidgetView-local @State, so the
+    /// writes did not compile and the toasts never rendered.
+    @Published var toastMessage: String?
     @Published var overlayTitle = ""
     @Published var overlayBody = ""
     @Published var overlayActionTitle = ""
