@@ -31,7 +31,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Show Swift / macOS version
         run: |
@@ -70,7 +70,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # A bare Mach-O binary is not something a user can install: Gatekeeper
       # blocks it and there is no bundle for the Info.plist or icon. Build the
